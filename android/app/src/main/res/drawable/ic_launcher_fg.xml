@@ -18,10 +18,8 @@
     <path
         android:fillColor="#79c0ff"
         android:pathData="M54,64 C46,64 39,67.5 34,73 L41,80 C44,76.5 48.7,74 54,74 C59.3,74 64,76.5 67,80 L74,73 C69,67.5 62,64 54,64Z"/>
-    <!-- WiFi dot -->
-    <circle
+    <!-- WiFi dot (circle via path) -->
+    <path
         android:fillColor="#3fb950"
-        android:cx="54"
-        android:cy="86"
-        android:r="6"/>
+        android:pathData="M54,80 A6,6 0 1,1 54,92 A6,6 0 1,1 54,80Z"/>
 </vector>
