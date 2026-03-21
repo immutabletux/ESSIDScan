@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.ESSIDscan" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
+    <style name="Theme.ESSIDscan" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="colorPrimary">@color/bg_card</item>
         <item name="colorPrimaryVariant">@color/bg_surface</item>
         <item name="colorOnPrimary">@color/text_primary</item>
