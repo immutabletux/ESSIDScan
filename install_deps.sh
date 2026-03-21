@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install dependencies for ESSIDScan WiFi Analyzer on Debian/Ubuntu Linux
+# Install dependencies for ESSIDscan on Debian/Ubuntu Linux
 set -e
 
 echo "==> Updating package list..."

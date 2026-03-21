@@ -1,4 +1,4 @@
-# ESSIDScan — WiFi Network Analyzer
+# ESSIDscan
 
 A **desktop GUI application** for scanning and monitoring WiFi networks on **Debian/Ubuntu Linux** using `iwlist`.
 

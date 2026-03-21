@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ESSIDScan — WiFi Network Analyzer
+ESSIDscan
 Desktop GUI application for Debian Linux using PyQt5 + iwlist.
 Run with: sudo python3 wifi_analyzer.py
 """
@@ -458,7 +458,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ESSIDScan — WiFi Network Analyzer")
+        self.setWindowTitle("ESSIDscan")
         self.resize(1280, 780)
         self.setMinimumSize(900, 600)
 
@@ -1011,7 +1011,7 @@ class MainWindow(QMainWindow):
 # ── Entry point ────────────────────────────────────────────────────────────────
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("ESSIDScan")
+    app.setApplicationName("ESSIDscan")
     app.setOrganizationName("immutabletux")
     window = MainWindow()
     window.show()
