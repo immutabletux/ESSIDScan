@@ -459,10 +459,153 @@ def merge_networks(primary: list, secondary: list) -> list:
         if n["bssid"] not in by_bssid:
             by_bssid[n["bssid"]] = n
         else:
-            # Keep the entry with the stronger signal
             if n["signal_dbm"] > by_bssid[n["bssid"]]["signal_dbm"]:
                 by_bssid[n["bssid"]] = n
     return list(by_bssid.values())
+
+
+# ── ADB / Android support ──────────────────────────────────────────────────────
+_ADB_PREFIX = "Android:"   # combo item prefix for ADB devices
+
+
+def get_adb_devices() -> list:
+    """Return list of connected ADB device serials (USB or TCP/IP)."""
+    try:
+        r = subprocess.run(
+            ["adb", "devices"],
+            capture_output=True, text=True, timeout=6,
+            **({"creationflags": 0x08000000} if IS_WINDOWS else {}),
+        )
+        serials = []
+        for line in r.stdout.splitlines()[1:]:
+            parts = line.strip().split()
+            if len(parts) == 2 and parts[1] == "device":
+                serials.append(parts[0])
+        return serials
+    except FileNotFoundError:
+        return []   # adb not installed
+    except Exception:
+        return []
+
+
+def _freq_mhz_to_channel(freq: int) -> int:
+    if 2412 <= freq <= 2484:
+        return (freq - 2407) // 5
+    if freq >= 5000:
+        return (freq - 5000) // 5
+    return 0
+
+
+def _caps_to_encryption(caps: str) -> str:
+    caps = caps.upper()
+    if "WPA3" in caps:  return "WPA2"   # show WPA3 as WPA2 for display
+    if "WPA2" in caps:  return "WPA2"
+    if "RSN"  in caps:  return "WPA2"
+    if "WPA"  in caps:  return "WPA"
+    if "WEP"  in caps:  return "WEP"
+    if "ESS"  in caps and "PRIVACY" not in caps: return "Open"
+    return "Open"
+
+
+def parse_dumpsys_wifi(output: str) -> list:
+    """
+    Parse Android 13+ `adb shell dumpsys wifi` output.
+    Handles multiple output formats across manufacturers/versions.
+    """
+    networks = []
+    seen     = set()
+    now      = datetime.now().strftime("%H:%M:%S")
+
+    def _add(essid, bssid, freq_mhz, level_dbm, caps):
+        bssid = bssid.upper()
+        if bssid in seen:
+            return
+        seen.add(bssid)
+        freq_mhz   = int(freq_mhz)
+        level_dbm  = int(level_dbm)
+        channel    = _freq_mhz_to_channel(freq_mhz)
+        freq_ghz   = f"{freq_mhz / 1000:.3f} GHz"
+        networks.append({
+            "essid":      essid.strip().strip('"'),
+            "bssid":      bssid,
+            "channel":    channel,
+            "frequency":  freq_ghz,
+            "signal_dbm": level_dbm,
+            "noise_dbm":  None,
+            "quality":    dbm_to_quality(level_dbm),
+            "encryption": _caps_to_encryption(caps),
+            "max_rate":   0.0,
+            "band":       "5 GHz" if freq_mhz >= 5000 else "2.4 GHz",
+            "vendor":     oui_vendor(bssid),
+            "last_seen":  now,
+        })
+
+    # ── Pattern A: "SSID: x, BSSID: x, capabilities: x, level: x, frequency: x"
+    for m in re.finditer(
+        r'SSID:\s*(?P<ssid>[^,\n]+),\s*BSSID:\s*(?P<bssid>[0-9a-fA-F:]{17})'
+        r'.*?capabilities:\s*(?P<caps>[^,\n]+)'
+        r'.*?level:\s*(?P<lvl>-?\d+)'
+        r'.*?frequency:\s*(?P<freq>\d+)',
+        output, re.IGNORECASE | re.DOTALL
+    ):
+        _add(m["ssid"], m["bssid"], m["freq"], m["lvl"], m["caps"])
+
+    # ── Pattern B: "BSSID=xx:xx  freq=XXXX  level=-XX  cap=[...]  SSID=xxx"
+    for m in re.finditer(
+        r'BSSID=(?P<bssid>[0-9a-fA-F:]{17})'
+        r'.*?freq=(?P<freq>\d+)'
+        r'.*?level=(?P<lvl>-?\d+)'
+        r'(?:.*?cap=(?P<caps>\[[^\]]*\]))?'
+        r'(?:.*?SSID=(?P<ssid>[^\s]+))?',
+        output, re.IGNORECASE
+    ):
+        if m["bssid"].upper() in seen:
+            continue
+        _add(m["ssid"] or "", m["bssid"],
+             m["freq"], m["lvl"], m["caps"] or "")
+
+    # ── Pattern C: tabular  "  AA:BB:CC:DD:EE:FF  2412  -67  MySSID  [WPA2-PSK][ESS]"
+    for m in re.finditer(
+        r'(?P<bssid>[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})'
+        r'\s+(?P<freq>\d{4,5})'
+        r'\s+(?P<lvl>-\d+)'
+        r'\s+(?P<ssid>\S.*?)\s+'
+        r'(?P<caps>\[[^\]]+\])',
+        output
+    ):
+        if m["bssid"].upper() in seen:
+            continue
+        _add(m["ssid"], m["bssid"], m["freq"], m["lvl"], m["caps"])
+
+    # ── Pattern D: JSON-ish  {SSID: "x", BSSID: "x", Frequency: x, RSSI: x, ...}
+    for m in re.finditer(
+        r'\{[^}]*SSID["\s]*:["\s]*(?P<ssid>[^"}\n,]+)'
+        r'[^}]*BSSID["\s]*:["\s]*(?P<bssid>[0-9a-fA-F:]{17})'
+        r'[^}]*[Ff]req\w*["\s]*:["\s]*(?P<freq>\d+)'
+        r'[^}]*(?:RSSI|[Ll]evel)["\s]*:["\s]*(?P<lvl>-?\d+)',
+        output
+    ):
+        if m["bssid"].upper() in seen:
+            continue
+        caps_m = re.search(r'[Cc]ap\w*["\s]*:["\s]*(?P<c>[^,}\n]+)', output[m.start():m.end()+50])
+        _add(m["ssid"], m["bssid"], m["freq"], m["lvl"],
+             caps_m.group("c") if caps_m else "")
+
+    return networks
+
+
+def adb_dumpsys_wifi(serial: str = None) -> str:
+    """Run adb shell dumpsys wifi on the given device serial."""
+    cmd = ["adb"]
+    if serial:
+        cmd += ["-s", serial]
+    cmd += ["shell", "dumpsys", "wifi"]
+    r = subprocess.run(
+        cmd,
+        capture_output=True, timeout=20,
+        **({"creationflags": 0x08000000} if IS_WINDOWS else {}),
+    )
+    return r.stdout.decode("utf-8", errors="replace")
 
 
 # ── Sortable numeric table item ────────────────────────────────────────────────
@@ -585,7 +728,9 @@ class ScanWorker(QThread):
         self.iface = iface
 
     def run(self):
-        if IS_WINDOWS:
+        if self.iface.startswith(_ADB_PREFIX):
+            self._run_android()
+        elif IS_WINDOWS:
             self._run_windows()
         else:
             self._run_linux()
@@ -748,6 +893,51 @@ class ScanWorker(QThread):
             )
             return
 
+        self.finished.emit(nets)
+
+    def _run_android(self):
+        # Extract serial: "Android: <serial>" → serial, "Android: (connect device)" → None
+        tail = self.iface[len(_ADB_PREFIX):].strip()
+        serial = None if (not tail or tail.startswith("(")) else tail
+
+        try:
+            out = adb_dumpsys_wifi(serial)
+        except subprocess.TimeoutExpired:
+            self.error.emit("ADB timed out. Check USB connection and try again.")
+            return
+        except FileNotFoundError:
+            self.error.emit(
+                "adb not found.\n\n"
+                "Install Android SDK Platform-Tools and ensure adb is in PATH."
+            )
+            return
+        except Exception as ex:
+            self.error.emit(f"ADB error: {ex}")
+            return
+
+        if "error: no devices" in out or "error: device not found" in out:
+            self.error.emit(
+                "No Android device found.\n\n"
+                "• Connect device via USB\n"
+                "• Enable Developer Options → USB Debugging\n"
+                "• Accept the RSA key prompt on the device"
+            )
+            return
+        if "permission denied" in out.lower():
+            self.error.emit(
+                "ADB permission denied.\n\n"
+                "Run: adb kill-server && adb start-server"
+            )
+            return
+
+        nets = parse_dumpsys_wifi(out)
+        if not nets:
+            self.error.emit(
+                "No networks found in dumpsys wifi output.\n\n"
+                "Ensure the device WiFi is enabled and Android 13+ is running.\n\n"
+                f"Raw (first 600 chars):\n{out[:600]}"
+            )
+            return
         self.finished.emit(nets)
 
 
@@ -1288,31 +1478,38 @@ class MainWindow(QMainWindow):
         return next(i for i, (k, _, _) in enumerate(self.COLUMNS) if k == key)
 
     def _populate_iface_combo(self):
-        """Fill interface combo: detected interfaces + separator + common names + All."""
+        """Fill interface combo: detected interfaces + ADB devices + common names."""
         self.iface_combo.clear()
         self._no_iface_warning = False
         detected = get_interfaces()
 
-        # ── Detected section ──────────────────────────────────────────────────
+        # ── Detected local interfaces ─────────────────────────────────────────
         if detected:
             for name in detected:
                 self.iface_combo.addItem(name)
         else:
             self._no_iface_warning = True
 
-        # ── "All Interfaces" option ───────────────────────────────────────────
-        self.iface_combo.insertSeparator(self.iface_combo.count())
-        self.iface_combo.addItem("⊞  All Interfaces")
+        # ── Android / ADB devices ─────────────────────────────────────────────
+        adb_devices = get_adb_devices()
+        if adb_devices:
+            self.iface_combo.insertSeparator(self.iface_combo.count())
+            for serial in adb_devices:
+                self.iface_combo.addItem(f"{_ADB_PREFIX} {serial}")
+        # Always offer a generic Android (ADB) option
+        if not adb_devices:
+            self.iface_combo.insertSeparator(self.iface_combo.count())
+        self.iface_combo.addItem(f"{_ADB_PREFIX} (connect device)")
 
         # ── Common / known names section ──────────────────────────────────────
         self.iface_combo.insertSeparator(self.iface_combo.count())
         known = _KNOWN_WINDOWS_IFACES if IS_WINDOWS else _KNOWN_LINUX_IFACES
         for name in known:
-            if name not in detected:          # skip duplicates
-                self.iface_combo.addItem(f"  {name}")   # leading spaces = "common" hint
+            if name not in detected:
+                self.iface_combo.addItem(f"  {name}")
 
-        # Default: first detected, or first common if none
-        self.iface_combo.setCurrentIndex(0 if detected else 3)  # skip separator/All
+        # Default: first detected interface
+        self.iface_combo.setCurrentIndex(0 if detected else 0)
 
     def _refresh_ifaces(self):
         """Re-detect interfaces and repopulate the combo box."""
