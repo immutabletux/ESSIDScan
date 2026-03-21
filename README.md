@@ -90,5 +90,3 @@ sudo python3 wifi_analyzer.py
 - Signal history is tracked per-session (up to 60 readings per network).
 
 ## License
-
-MIT
