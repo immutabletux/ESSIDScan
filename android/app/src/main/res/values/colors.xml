@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- App icon -->
+    <color name="icon_blue">#1565c0</color>
+
     <!-- Dark theme palette matching the desktop app -->
     <color name="bg_dark">#0d1117</color>
     <color name="bg_surface">#161b22</color>
