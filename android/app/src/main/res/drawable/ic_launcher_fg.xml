@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simple WiFi arc icon for ESSIDscan launcher -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- WiFi outer arc -->
+    <path
+        android:fillColor="#79c0ff"
+        android:pathData="M54,28 C38,28 23.5,34.5 13,45 L20,52 C28.5,43.5 40.5,38 54,38 C67.5,38 79.5,43.5 88,52 L95,45 C84.5,34.5 70,28 54,28Z"/>
+    <!-- WiFi middle arc -->
+    <path
+        android:fillColor="#79c0ff"
+        android:pathData="M54,46 C42,46 31,51 23,59 L30,66 C36,60 44.5,56 54,56 C63.5,56 72,60 78,66 L85,59 C77,51 66,46 54,46Z"/>
+    <!-- WiFi inner arc -->
+    <path
+        android:fillColor="#79c0ff"
+        android:pathData="M54,64 C46,64 39,67.5 34,73 L41,80 C44,76.5 48.7,74 54,74 C59.3,74 64,76.5 67,80 L74,73 C69,67.5 62,64 54,64Z"/>
+    <!-- WiFi dot -->
+    <circle
+        android:fillColor="#3fb950"
+        android:cx="54"
+        android:cy="86"
+        android:r="6"/>
+</vector>
