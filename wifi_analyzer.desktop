@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=WiFi Analyzer
+Comment=iwlist ESSID/BSSID Network Monitor
+Exec=bash -c "pkexec python3 /path/to/wifi_analyzer.py"
+Icon=network-wireless
+Terminal=false
+Categories=Network;Utility;
+Keywords=wifi;wireless;scan;monitor;essid;bssid;
