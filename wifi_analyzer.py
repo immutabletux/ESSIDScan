@@ -62,6 +62,18 @@ def signal_color(dbm: int) -> QColor:
 
 # ── Interface detection ────────────────────────────────────────────────────────
 def get_interfaces() -> list:
+    # Most reliable: check /sys/class/net/<iface>/wireless directory existence
+    try:
+        import os as _os
+        sys_ifaces = [
+            iface for iface in _os.listdir("/sys/class/net")
+            if _os.path.isdir(f"/sys/class/net/{iface}/wireless")
+        ]
+        if sys_ifaces:
+            return sorted(sys_ifaces)
+    except Exception:
+        pass
+    # Fallback: parse iwconfig output
     try:
         r = subprocess.run(["iwconfig"], capture_output=True, text=True, timeout=5)
         ifaces = re.findall(r'^(\w+)\s+IEEE', r.stdout, re.MULTILINE)
@@ -69,12 +81,23 @@ def get_interfaces() -> list:
             return ifaces
     except Exception:
         pass
+    # Fallback: /proc/net/wireless
     try:
         with open("/proc/net/wireless") as f:
-            return [l.split(":")[0].strip() for l in f.readlines()[2:] if ":" in l]
+            ifaces = [l.split(":")[0].strip() for l in f.readlines()[2:] if ":" in l]
+            if ifaces:
+                return ifaces
     except Exception:
         pass
-    return ["wlan0"]
+    # Fallback: iw dev
+    try:
+        r = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=5)
+        ifaces = re.findall(r'Interface\s+(\S+)', r.stdout)
+        if ifaces:
+            return ifaces
+    except Exception:
+        pass
+    return []
 
 
 # ── iwlist parser ──────────────────────────────────────────────────────────────
@@ -266,8 +289,26 @@ class ScanWorker(QThread):
         if "Interface doesn't support scanning" in out:
             self.error.emit(f"{self.iface} does not support scanning.")
             return
+        if "No such device" in out:
+            self.error.emit(
+                f"Interface '{self.iface}' not found.\n\n"
+                "Select a valid wireless interface from the dropdown."
+            )
+            return
+        if "Network is down" in out:
+            self.error.emit(
+                f"Interface '{self.iface}' is down.\n\n"
+                f"Try: sudo ip link set {self.iface} up"
+            )
+            return
 
-        self.finished.emit(parse_iwlist(out))
+        nets = parse_iwlist(out)
+        if not nets and r.returncode != 0:
+            self.error.emit(
+                f"iwlist returned no results.\n\nRaw output:\n{out[:300]}"
+            )
+            return
+        self.finished.emit(nets)
 
 
 # ── Detail panel ───────────────────────────────────────────────────────────────
@@ -468,6 +509,7 @@ class MainWindow(QMainWindow):
         self._auto_timer = QTimer(self)
         self._auto_timer.timeout.connect(self._start_scan)
 
+        self._no_iface_warning = False
         self._apply_stylesheet()
         self._build_ui()
         self._check_root()
@@ -634,8 +676,13 @@ class MainWindow(QMainWindow):
         # Interface
         tb.addWidget(QLabel("  Interface:"))
         self.iface_combo = QComboBox()
-        self.iface_combo.addItems(get_interfaces())
-        self.iface_combo.setFixedWidth(100)
+        ifaces = get_interfaces()
+        if ifaces:
+            self.iface_combo.addItems(ifaces)
+        else:
+            self.iface_combo.addItem("(none found)")
+            self._no_iface_warning = True
+        self.iface_combo.setFixedWidth(120)
         tb.addWidget(self.iface_combo)
 
         tb.addSeparator()
@@ -798,6 +845,13 @@ class MainWindow(QMainWindow):
         return next(i for i, (k, _, _) in enumerate(self.COLUMNS) if k == key)
 
     def _check_root(self):
+        if self._no_iface_warning:
+            self._set_status(
+                "No wireless interfaces found. "
+                "Ensure your WiFi adapter is connected and drivers are loaded.",
+                "#f85149"
+            )
+            return
         if hasattr(os, "geteuid") and os.geteuid() != 0:
             self._set_status(
                 "Not running as root — scan may fail. Try: sudo python3 wifi_analyzer.py",
@@ -813,6 +867,14 @@ class MainWindow(QMainWindow):
         if self._worker and self._worker.isRunning():
             return
         iface = self.iface_combo.currentText()
+        if not iface or iface == "(none found)":
+            QMessageBox.warning(
+                self, "No Interface",
+                "No wireless interface found.\n\n"
+                "Ensure your WiFi adapter is connected and drivers are loaded.\n"
+                "Then restart ESSIDscan."
+            )
+            return
         self.btn_scan.setEnabled(False)
         self.btn_scan.setText("  Scanning…")
         self.progress_bar.setVisible(True)
