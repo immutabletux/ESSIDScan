@@ -39,10 +39,7 @@ public class MainActivity extends AppCompatActivity {
     private final BroadcastReceiver scanReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context ctx, Intent intent) {
-            boolean success = intent.getBooleanExtra(
-                    WifiManager.EXTRA_RESULTS_UPDATED, false);
             loadScanResults();
-            swipeRefresh.setRefreshing(false);
         }
     };
 
@@ -53,6 +50,9 @@ public class MainActivity extends AppCompatActivity {
 
         Toolbar toolbar = findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
+        if (getSupportActionBar() != null) {
+            getSupportActionBar().setTitle("ESSIDscan");
+        }
 
         wifiManager  = (WifiManager) getApplicationContext()
                             .getSystemService(Context.WIFI_SERVICE);
@@ -73,16 +73,20 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        IntentFilter filter = new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
-        registerReceiver(scanReceiver, filter);
-        receiverRegistered = true;
+        try {
+            IntentFilter filter = new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
+            registerReceiver(scanReceiver, filter);
+            receiverRegistered = true;
+        } catch (Exception e) {
+            receiverRegistered = false;
+        }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         if (receiverRegistered) {
-            unregisterReceiver(scanReceiver);
+            try { unregisterReceiver(scanReceiver); } catch (Exception ignored) {}
             receiverRegistered = false;
         }
     }
@@ -105,17 +109,30 @@ public class MainActivity extends AppCompatActivity {
 
     // ── Permissions ──────────────────────────────────────────────────────────────
 
-    private void checkPermissionsAndScan() {
-        List<String> needed = new ArrayList<>();
-        needed.add(Manifest.permission.ACCESS_FINE_LOCATION);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            needed.add(Manifest.permission.NEARBY_WIFI_DEVICES);
+    private boolean hasRequiredPermissions() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            return false;
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return ActivityCompat.checkSelfPermission(this,
+                    Manifest.permission.NEARBY_WIFI_DEVICES)
+                    == PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
+    }
+
+    private void checkPermissionsAndScan() {
         List<String> toRequest = new ArrayList<>();
-        for (String p : needed) {
-            if (ActivityCompat.checkSelfPermission(this, p)
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            toRequest.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ActivityCompat.checkSelfPermission(this,
+                    Manifest.permission.NEARBY_WIFI_DEVICES)
                     != PackageManager.PERMISSION_GRANTED) {
-                toRequest.add(p);
+                toRequest.add(Manifest.permission.NEARBY_WIFI_DEVICES);
             }
         }
         if (toRequest.isEmpty()) {
@@ -130,25 +147,18 @@ public class MainActivity extends AppCompatActivity {
     public void onRequestPermissionsResult(int requestCode,
             @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQ_PERMISSIONS) {
-            boolean allGranted = true;
-            for (int r : grantResults) {
-                if (r != PackageManager.PERMISSION_GRANTED) {
-                    allGranted = false;
-                    break;
-                }
-            }
-            if (allGranted) {
-                startScan();
-            } else {
-                Snackbar.make(findViewById(android.R.id.content),
-                        "Location permission required for WiFi scanning",
-                        Snackbar.LENGTH_LONG)
-                        .setAction("Retry", v -> checkPermissionsAndScan())
-                        .show();
-                // Show cached results even without permission
-                loadScanResults();
-            }
+        if (requestCode != REQ_PERMISSIONS) return;
+
+        if (hasRequiredPermissions()) {
+            startScan();
+        } else {
+            // At least try to show whatever cached results exist
+            loadScanResults();
+            Snackbar.make(findViewById(android.R.id.content),
+                    "Location permission required for WiFi scanning",
+                    Snackbar.LENGTH_LONG)
+                    .setAction("Retry", v -> checkPermissionsAndScan())
+                    .show();
         }
     }
 
@@ -157,56 +167,72 @@ public class MainActivity extends AppCompatActivity {
     @SuppressWarnings("deprecation")
     private void startScan() {
         if (wifiManager == null) {
-            Toast.makeText(this, "WiFi not available", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "WiFi not available on this device",
+                    Toast.LENGTH_SHORT).show();
             swipeRefresh.setRefreshing(false);
             return;
         }
         if (!wifiManager.isWifiEnabled()) {
             Snackbar.make(findViewById(android.R.id.content),
-                    "WiFi is disabled — showing cached results",
+                    "WiFi is disabled — enable it to scan",
                     Snackbar.LENGTH_LONG).show();
             loadScanResults();
             swipeRefresh.setRefreshing(false);
             return;
         }
+        if (!hasRequiredPermissions()) {
+            checkPermissionsAndScan();
+            return;
+        }
+
         swipeRefresh.setRefreshing(true);
-        boolean started = wifiManager.startScan();
-        if (!started) {
-            // Scan throttled — load whatever is cached
+        try {
+            boolean started = wifiManager.startScan();
+            if (!started) {
+                // Throttled — show cached results
+                loadScanResults();
+                swipeRefresh.setRefreshing(false);
+                Toast.makeText(this,
+                        "Scan throttled — showing cached results",
+                        Toast.LENGTH_SHORT).show();
+            }
+        } catch (SecurityException e) {
             loadScanResults();
             swipeRefresh.setRefreshing(false);
-            Toast.makeText(this,
-                    "Scan throttled by Android — showing cached results",
-                    Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Permission denied for scan", Toast.LENGTH_SHORT).show();
         }
     }
 
     private void loadScanResults() {
         if (wifiManager == null) return;
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED) {
+        if (!hasRequiredPermissions()) return;
+
+        List<ScanResult> raw;
+        try {
+            raw = wifiManager.getScanResults();
+        } catch (SecurityException e) {
+            Toast.makeText(this, "Cannot read scan results: permission denied",
+                    Toast.LENGTH_SHORT).show();
+            swipeRefresh.setRefreshing(false);
             return;
         }
 
-        List<ScanResult> raw = wifiManager.getScanResults();
         List<WifiNetwork> nets = new ArrayList<>();
-
         for (ScanResult sr : raw) {
-            int    freq    = sr.frequency;
-            int    channel = WifiNetwork.freqToChannel(freq);
-            String freqGhz = WifiNetwork.freqToGhz(freq);
-            String band    = freq >= 5000 ? "5 GHz" : "2.4 GHz";
-            String enc     = WifiNetwork.capabilitiesToEncryption(sr.capabilities);
-            String vendor  = ouiVendor(sr.BSSID);
-            String ssid    = (sr.SSID != null) ? sr.SSID.replace("\"", "") : "";
-
-            nets.add(new WifiNetwork(ssid, sr.BSSID, sr.level,
-                    channel, freqGhz, band, enc, vendor));
+            try {
+                int    freq    = sr.frequency;
+                int    channel = WifiNetwork.freqToChannel(freq);
+                String freqGhz = WifiNetwork.freqToGhz(freq);
+                String band    = freq >= 5000 ? "5 GHz" : "2.4 GHz";
+                String enc     = WifiNetwork.capabilitiesToEncryption(sr.capabilities);
+                String vendor  = ouiVendor(sr.BSSID);
+                String ssid    = (sr.SSID != null) ? sr.SSID.replace("\"", "") : "";
+                nets.add(new WifiNetwork(ssid, sr.BSSID, sr.level,
+                        channel, freqGhz, band, enc, vendor));
+            } catch (Exception ignored) {}
         }
 
-        // Sort by signal strength (strongest first)
         Collections.sort(nets, (a, b) -> b.signalDbm - a.signalDbm);
-
         adapter.update(nets);
         tvCount.setText(nets.size() + " networks");
         swipeRefresh.setRefreshing(false);
@@ -215,7 +241,6 @@ public class MainActivity extends AppCompatActivity {
     /** Minimal OUI vendor lookup from BSSID prefix */
     private String ouiVendor(String bssid) {
         if (bssid == null || bssid.length() < 8) return "";
-        // Common OUI prefixes (expand as needed)
         String oui = bssid.substring(0, 8).toUpperCase();
         switch (oui) {
             case "00:50:F2": return "Microsoft";

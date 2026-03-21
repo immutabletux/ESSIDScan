@@ -46,12 +46,16 @@ public class NetworkAdapter extends RecyclerView.Adapter<NetworkAdapter.VH> {
         // Colour signal bar by strength
         int q = n.quality();
         int color;
-        if (q >= 67) color = 0xFF3fb950;      // green
-        else if (q >= 34) color = 0xFFd29922;  // amber
-        else color = 0xFFf85149;               // red
-        h.signalBar.getProgressDrawable().setColorFilter(
-                new android.graphics.PorterDuffColorFilter(color,
-                        android.graphics.PorterDuff.Mode.SRC_IN));
+        if (q >= 67) color = 0xFF3fb950;
+        else if (q >= 34) color = 0xFFd29922;
+        else color = 0xFFf85149;
+        try {
+            android.graphics.drawable.Drawable d = h.signalBar.getProgressDrawable();
+            if (d != null) {
+                d.setColorFilter(new android.graphics.PorterDuffColorFilter(
+                        color, android.graphics.PorterDuff.Mode.SRC_IN));
+            }
+        } catch (Exception ignored) {}
     }
 
     @Override
