@@ -61,18 +61,7 @@ sudo python3 wifi_analyzer.py
 
 ## Screenshot
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│ ⬡ WiFi Network Analyzer   iwlist monitor            2026-03-21      │
-├──────────────────────────────────────────────────────────────────────┤
-│ Interface: wlan0 │ [Scan] [Auto OFF] every 5s │ [Clear] │ Search…   │
-├────────────┬────────────────────┬───────────────────┬───────────────┤
-│ Signal     │ ESSID              │ BSSID             │ Security …   │
-│ ▂▄▆█ -45  │ HomeNetwork        │ AA:BB:CC:DD:EE:FF │ WPA2         │
-│ ▂▄▆· -67  │ CoffeeShop_WiFi    │ 11:22:33:44:55:66 │ WPA2         │
-│ ▂▄·· -78  │ <hidden>           │ 77:88:99:AA:BB:CC │ WEP          │
-└────────────┴────────────────────┴───────────────────┴───────────────┘
-```
+![ESSIDscan GUI](screenshot.png)
 
 ---
 
