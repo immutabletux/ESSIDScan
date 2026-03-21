@@ -67,7 +67,7 @@ def signal_color(dbm: int) -> QColor:
 _WIRELESS_PREFIXES = ("wlan", "wifi", "wl", "ath", "ra", "mon", "wlp", "wlx")
 _SKIP_IFACES = {"lo", "loopback"}
 
-# Well-known interface names shown as manual fallback options
+# Well-known interface names always included as manual options
 _KNOWN_LINUX_IFACES = [
     "wlan0", "wlan1", "wlan2", "wlan3",
     "wifi0", "wifi1",
@@ -81,9 +81,9 @@ _KNOWN_WINDOWS_IFACES = [
     "Wi-Fi", "Wi-Fi 2", "Wi-Fi 3",
     "Wireless Network Connection",
     "Wireless Network Connection 2",
-    "WLAN", "wlan",
-    "Local Area Connection",
+    "WLAN",
     "Ethernet", "Ethernet 2",
+    "Local Area Connection",
 ]
 
 def _is_wireless_name(name: str) -> bool:
@@ -118,12 +118,16 @@ def get_interfaces_windows() -> list:
         for line in r.stdout.splitlines():
             parts = line.split()
             if len(parts) >= 4 and parts[0] in ("Enabled", "Disabled"):
-                # Interface name is everything after the 3rd column
                 name = " ".join(parts[3:]).strip()
                 if name and name not in seen and name.lower() not in _SKIP_IFACES:
                     seen.append(name)
     except Exception:
         pass
+
+    # 3. Always append known common names not already found
+    for name in _KNOWN_WINDOWS_IFACES:
+        if name not in seen:
+            seen.append(name)
 
     return seen
 
@@ -172,9 +176,12 @@ def get_interfaces() -> list:
         except Exception:
             pass
 
-    # Return wireless first, then remaining
+    # Return wireless first, then remaining detected, then known common names
     ordered = list(wireless)
     for iface in all_ifaces:
+        if iface not in ordered:
+            ordered.append(iface)
+    for iface in _KNOWN_LINUX_IFACES:
         if iface not in ordered:
             ordered.append(iface)
     return ordered
