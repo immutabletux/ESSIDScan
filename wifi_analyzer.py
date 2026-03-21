@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 ESSIDscan
-Desktop GUI application for Debian Linux using PyQt5 + iwlist.
-Run with: sudo python3 wifi_analyzer.py
+Desktop GUI application for Windows 10 / Debian Linux.
+  Windows : uses netsh wlan show networks mode=bssid
+  Linux   : uses iwlist scan
 """
 
 import sys
@@ -11,6 +12,8 @@ import re
 import subprocess
 from datetime import datetime
 from collections import defaultdict
+
+IS_WINDOWS = sys.platform == "win32"
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -61,7 +64,22 @@ def signal_color(dbm: int) -> QColor:
 
 
 # ── Interface detection ────────────────────────────────────────────────────────
+def get_interfaces_windows() -> list:
+    """Return wireless interface names on Windows via netsh."""
+    try:
+        r = subprocess.run(
+            ["netsh", "wlan", "show", "interfaces"],
+            capture_output=True, text=True, timeout=8,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        )
+        return re.findall(r'^\s+Name\s+:\s+(.+)$', r.stdout, re.MULTILINE)
+    except Exception:
+        return []
+
+
 def get_interfaces() -> list:
+    if IS_WINDOWS:
+        return get_interfaces_windows()
     # Most reliable: check /sys/class/net/<iface>/wireless directory existence
     try:
         import os as _os
@@ -98,6 +116,105 @@ def get_interfaces() -> list:
     except Exception:
         pass
     return []
+
+
+# ── netsh wlan parser ──────────────────────────────────────────────────────────
+def _channel_to_freq(ch: int) -> str:
+    if 1 <= ch <= 14:
+        freqs = {1:2412,2:2417,3:2422,4:2427,5:2432,6:2437,7:2442,
+                 8:2447,9:2452,10:2457,11:2462,12:2467,13:2472,14:2484}
+        mhz = freqs.get(ch, 2412 + (ch-1)*5)
+        return f"{mhz/1000:.3f} GHz"
+    # 5 GHz channels
+    mhz = 5000 + ch * 5
+    return f"{mhz/1000:.3f} GHz"
+
+
+def _netsh_auth_to_enc(auth: str) -> str:
+    auth = auth.strip().upper()
+    if "WPA2" in auth:    return "WPA2"
+    if "WPA3" in auth:    return "WPA2"   # treat WPA3 as WPA2 for display
+    if "WPA"  in auth:    return "WPA"
+    if "WEP"  in auth:    return "WEP"
+    return "Open"
+
+
+def parse_netsh(output: str) -> list:
+    """Parse output of: netsh wlan show networks mode=bssid"""
+    networks = []
+    now = datetime.now().strftime("%H:%M:%S")
+
+    # Split into per-SSID blocks
+    ssid_blocks = re.split(r'(?=^SSID \d+ :)', output, flags=re.MULTILINE)
+
+    for block in ssid_blocks:
+        if not block.strip() or not block.startswith("SSID"):
+            continue
+
+        m = re.match(r'SSID \d+ : (.*)', block)
+        essid = m.group(1).strip() if m else ""
+
+        auth_m = re.search(r'Authentication\s+:\s+(.+)', block)
+        auth_str = auth_m.group(1).strip() if auth_m else "Unknown"
+        encryption = _netsh_auth_to_enc(auth_str)
+
+        # Each BSSID sub-block
+        bssid_blocks = re.split(r'(?=^\s+BSSID \d+\s+:)', block, flags=re.MULTILINE)
+        for bb in bssid_blocks:
+            bm = re.search(r'BSSID \d+\s+:\s+([0-9a-fA-F:]{17})', bb)
+            if not bm:
+                continue
+            bssid = bm.group(1).upper()
+
+            sig_m = re.search(r'Signal\s+:\s+(\d+)%', bb)
+            quality = int(sig_m.group(1)) if sig_m else 0
+            signal_dbm = quality // 2 - 100   # approximate conversion
+
+            ch_m = re.search(r'Channel\s+:\s+(\d+)', bb)
+            channel = int(ch_m.group(1)) if ch_m else 0
+
+            freq = _channel_to_freq(channel) if channel else "?"
+            band = "5 GHz" if channel >= 36 else "2.4 GHz"
+
+            # Max rate from all rate fields
+            rates = [float(x) for x in re.findall(r'(\d+(?:\.\d+)?)\s*(?=\s|\Z)', bb)
+                     if re.match(r'\d', x)]
+            rate_m = re.findall(r'rates?\s*\(Mbps\)\s*:\s*([\d\s.]+)', bb, re.IGNORECASE)
+            max_rate = 0.0
+            for rm in rate_m:
+                for v in rm.split():
+                    try:
+                        max_rate = max(max_rate, float(v))
+                    except ValueError:
+                        pass
+
+            # Radio type → hint for better max_rate estimate when not available
+            radio_m = re.search(r'Radio type\s+:\s+(.+)', bb)
+            radio = radio_m.group(1).strip() if radio_m else ""
+            if max_rate == 0:
+                if "ac" in radio.lower():   max_rate = 867.0
+                elif "ax" in radio.lower(): max_rate = 1200.0
+                elif "n"  in radio.lower(): max_rate = 300.0
+                elif "a"  in radio.lower(): max_rate = 54.0
+                elif "g"  in radio.lower(): max_rate = 54.0
+                else:                       max_rate = 54.0
+
+            networks.append({
+                "essid":      essid,
+                "bssid":      bssid,
+                "channel":    channel,
+                "frequency":  freq,
+                "signal_dbm": signal_dbm,
+                "noise_dbm":  None,
+                "quality":    dbm_to_quality(signal_dbm),
+                "encryption": encryption,
+                "max_rate":   max_rate,
+                "band":       band,
+                "vendor":     oui_vendor(bssid),
+                "last_seen":  now,
+            })
+
+    return networks
 
 
 # ── iwlist parser ──────────────────────────────────────────────────────────────
@@ -270,6 +387,50 @@ class ScanWorker(QThread):
         self.iface = iface
 
     def run(self):
+        if IS_WINDOWS:
+            self._run_windows()
+        else:
+            self._run_linux()
+
+    def _run_windows(self):
+        try:
+            r = subprocess.run(
+                ["netsh", "wlan", "show", "networks",
+                 f"interface={self.iface}", "mode=bssid"],
+                capture_output=True, text=True, timeout=20,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+            )
+            out = r.stdout
+        except subprocess.TimeoutExpired:
+            self.error.emit("Scan timed out.")
+            return
+        except FileNotFoundError:
+            self.error.emit("netsh not found — is this Windows?")
+            return
+        except Exception as ex:
+            self.error.emit(str(ex))
+            return
+
+        if "There is no wireless interface" in out or "is not running" in out:
+            self.error.emit(
+                f"Interface '{self.iface}' is not available.\n\n"
+                "Ensure your WiFi adapter is enabled in Windows."
+            )
+            return
+        if "AutoConfig is not enabled" in out:
+            self.error.emit(
+                "Windows WLAN AutoConfig service is disabled.\n\n"
+                "Enable it: Services → WLAN AutoConfig → Start"
+            )
+            return
+
+        nets = parse_netsh(out)
+        if not nets and r.returncode != 0:
+            self.error.emit(f"netsh returned no results.\n\nOutput:\n{out[:300]}")
+            return
+        self.finished.emit(nets)
+
+    def _run_linux(self):
         try:
             r = subprocess.run(
                 ["iwlist", self.iface, "scan"],
@@ -304,9 +465,7 @@ class ScanWorker(QThread):
 
         nets = parse_iwlist(out)
         if not nets and r.returncode != 0:
-            self.error.emit(
-                f"iwlist returned no results.\n\nRaw output:\n{out[:300]}"
-            )
+            self.error.emit(f"iwlist returned no results.\n\nRaw output:\n{out[:300]}")
             return
         self.finished.emit(nets)
 
@@ -853,7 +1012,7 @@ class MainWindow(QMainWindow):
             self.btn_scan.setEnabled(False)
             self.btn_auto.setEnabled(False)
             return
-        if hasattr(os, "geteuid") and os.geteuid() != 0:
+        if not IS_WINDOWS and hasattr(os, "geteuid") and os.geteuid() != 0:
             self._set_status(
                 "Not running as root — scan may fail. Try: sudo python3 wifi_analyzer.py",
                 "#d29922"
