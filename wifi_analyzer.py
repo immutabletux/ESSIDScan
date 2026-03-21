@@ -10,10 +10,51 @@ import sys
 import os
 import re
 import subprocess
+import time
+import ctypes
 from datetime import datetime
 from collections import defaultdict
 
 IS_WINDOWS = sys.platform == "win32"
+
+
+# ── Force a fresh Windows WLAN scan via WlanScan API ──────────────────────────
+def _wlan_force_scan() -> bool:
+    """
+    Call WlanScan() for every wireless adapter so Windows performs a fresh
+    RF scan. Returns True if at least one adapter was triggered.
+    netsh/wlan show networks only returns cached results without this.
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        wlan = ctypes.WinDLL("wlanapi.dll")
+        handle   = ctypes.c_void_p()
+        version  = ctypes.c_ulong()
+        if wlan.WlanOpenHandle(2, None, ctypes.byref(version), ctypes.byref(handle)) != 0:
+            return False
+
+        iface_list = ctypes.c_void_p()
+        if wlan.WlanEnumInterfaces(handle, None, ctypes.byref(iface_list)) != 0:
+            wlan.WlanCloseHandle(handle, None)
+            return False
+
+        # WLAN_INTERFACE_INFO_LIST: first DWORD = number of entries
+        num = ctypes.cast(iface_list, ctypes.POINTER(ctypes.c_ulong))[0]
+        # List header = 8 bytes; each WLAN_INTERFACE_INFO entry = 532 bytes
+        base = iface_list.value + 8
+        triggered = 0
+        for i in range(num):
+            guid_ptr = ctypes.c_void_p(base + i * 532)
+            if wlan.WlanScan(handle, guid_ptr, None, None, None) == 0:
+                triggered += 1
+
+        wlan.WlanFreeMemory(iface_list)
+        wlan.WlanCloseHandle(handle, None)
+        return triggered > 0
+    except Exception:
+        return False
+
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -358,6 +399,72 @@ def parse_iwlist(output: str) -> list:
     return networks
 
 
+# ── iw dev scan parser (modern Linux supplement) ───────────────────────────────
+def parse_iw_scan(output: str) -> list:
+    """Parse output of: iw dev <iface> scan  (supplements iwlist results)."""
+    networks = []
+    now = datetime.now().strftime("%H:%M:%S")
+    for block in re.split(r'(?=^BSS [0-9a-fA-F:]{17})', output, flags=re.MULTILINE):
+        bm = re.search(r'^BSS ([0-9a-fA-F:]{17})', block, re.MULTILINE)
+        if not bm:
+            continue
+        n = {}
+        n["bssid"] = bm.group(1).upper()
+
+        m = re.search(r'SSID: (.+)', block)
+        n["essid"] = m.group(1).strip() if m else ""
+
+        m = re.search(r'freq: (\d+)', block)
+        freq_mhz = int(m.group(1)) if m else 0
+        n["frequency"] = f"{freq_mhz / 1000:.3f} GHz" if freq_mhz else "?"
+
+        m = re.search(r'DS Parameter set: channel (\d+)', block) \
+            or re.search(r'\* primary channel: (\d+)', block)
+        if m:
+            n["channel"] = int(m.group(1))
+        elif 2412 <= freq_mhz <= 2484:
+            n["channel"] = (freq_mhz - 2407) // 5
+        elif freq_mhz >= 5000:
+            n["channel"] = (freq_mhz - 5000) // 5
+        else:
+            n["channel"] = 0
+
+        m = re.search(r'signal: (-[\d.]+) dBm', block)
+        n["signal_dbm"] = int(float(m.group(1))) if m else -100
+
+        m = re.search(r'noise: (-[\d.]+) dBm', block)
+        n["noise_dbm"] = int(float(m.group(1))) if m else None
+
+        n["quality"] = dbm_to_quality(n["signal_dbm"])
+
+        if re.search(r'RSN:', block):          n["encryption"] = "WPA2"
+        elif re.search(r'WPA:', block):        n["encryption"] = "WPA"
+        elif re.search(r'Privacy', block):     n["encryption"] = "WEP"
+        else:                                  n["encryption"] = "Open"
+
+        rates = re.findall(r'(\d+\.?\d*) Mbps', block)
+        n["max_rate"] = max((float(r) for r in rates), default=0.0)
+
+        n["band"]      = "5 GHz" if (freq_mhz >= 5000) else "2.4 GHz"
+        n["vendor"]    = oui_vendor(n["bssid"])
+        n["last_seen"] = now
+        networks.append(n)
+    return networks
+
+
+def merge_networks(primary: list, secondary: list) -> list:
+    """Merge two network lists, keeping richest data per BSSID."""
+    by_bssid = {n["bssid"]: n for n in primary}
+    for n in secondary:
+        if n["bssid"] not in by_bssid:
+            by_bssid[n["bssid"]] = n
+        else:
+            # Keep the entry with the stronger signal
+            if n["signal_dbm"] > by_bssid[n["bssid"]]["signal_dbm"]:
+                by_bssid[n["bssid"]] = n
+    return list(by_bssid.values())
+
+
 # ── Sortable numeric table item ────────────────────────────────────────────────
 class NumericItem(QTableWidgetItem):
     """QTableWidgetItem that sorts by a numeric UserRole value."""
@@ -502,7 +609,11 @@ class ScanWorker(QThread):
 
     def _run_windows(self):
         try:
-            # 1. Scan without specifying interface — catches all wireless adapters
+            # 1. Trigger a fresh RF scan via WlanScan API, then wait for it to finish
+            _wlan_force_scan()
+            time.sleep(3)   # Windows needs ~2-4 s to complete the scan
+
+            # 2. Read results — scan without interface= first (catches all adapters)
             out = self._netsh_scan()
 
             # If no results or interface error, retry with explicit interface name
@@ -595,7 +706,20 @@ class ScanWorker(QThread):
             return
 
         nets = parse_iwlist(out)
-        # If zero results, try the other wireless interfaces
+
+        # Supplement with `iw dev scan` — catches networks iwlist misses
+        try:
+            iw_r = subprocess.run(
+                ["iw", "dev", self.iface, "scan"],
+                capture_output=True, text=True, timeout=20,
+            )
+            iw_nets = parse_iw_scan(iw_r.stdout)
+            if iw_nets:
+                nets = merge_networks(nets, iw_nets)
+        except Exception:
+            pass
+
+        # If still zero results, try every other wireless interface
         if not nets:
             fallback_ifaces = [
                 i for i in get_interfaces()
@@ -605,6 +729,14 @@ class ScanWorker(QThread):
                 try:
                     fb_out, _ = self._iwlist_scan(fb)
                     nets = parse_iwlist(fb_out)
+                    try:
+                        iw_r = subprocess.run(
+                            ["iw", "dev", fb, "scan"],
+                            capture_output=True, text=True, timeout=20,
+                        )
+                        nets = merge_networks(nets, parse_iw_scan(iw_r.stdout))
+                    except Exception:
+                        pass
                     if nets:
                         self.finished.emit(nets)
                         return
