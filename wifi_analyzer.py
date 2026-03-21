@@ -1,551 +1,827 @@
 #!/usr/bin/env python3
 """
-WiFi Network Analyzer - iwlist ESSID/BSSID Monitor
-A desktop GUI application for scanning and monitoring WiFi networks on Debian Linux.
-Requires: python3-tk, wireless-tools (iwlist)
+ESSIDScan — WiFi Network Analyzer
+Desktop GUI application for Debian Linux using PyQt5 + iwlist.
 Run with: sudo python3 wifi_analyzer.py
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, font
+import sys
+import os
+import re
 import subprocess
 import threading
-import re
-import time
-import os
-import sys
 from datetime import datetime
 from collections import defaultdict
 
-
-# ── Color palette ──────────────────────────────────────────────────────────────
-BG_DARK       = "#0d1117"
-BG_PANEL      = "#161b22"
-BG_CARD       = "#1c2128"
-BG_HOVER      = "#21262d"
-ACCENT_BLUE   = "#58a6ff"
-ACCENT_GREEN  = "#3fb950"
-ACCENT_YELLOW = "#d29922"
-ACCENT_RED    = "#f85149"
-ACCENT_PURPLE = "#bc8cff"
-ACCENT_CYAN   = "#79c0ff"
-TEXT_PRIMARY  = "#e6edf3"
-TEXT_MUTED    = "#8b949e"
-TEXT_DIM      = "#484f58"
-BORDER        = "#30363d"
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QComboBox, QLineEdit, QSpinBox, QCheckBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QSplitter,
+    QFrame, QProgressBar, QGroupBox, QScrollArea, QSizePolicy,
+    QAbstractItemView, QToolBar, QAction, QStatusBar, QMessageBox,
+)
+from PyQt5.QtCore import (
+    Qt, QTimer, QThread, pyqtSignal, QSize, QRect, QPoint,
+)
+from PyQt5.QtGui import (
+    QColor, QPainter, QPen, QBrush, QFont, QFontDatabase,
+    QLinearGradient, QPalette, QIcon, QPixmap,
+)
 
 
-def get_interfaces():
-    """Return a list of wireless interface names."""
+# ── OUI vendor table ───────────────────────────────────────────────────────────
+OUI_VENDORS = {
+    "18:D6:C7": "TP-Link",   "A4:2B:B0": "TP-Link",   "EC:08:6B": "TP-Link",
+    "8C:59:C3": "Netgear",   "A0:04:60": "Netgear",   "28:80:88": "Netgear",
+    "20:E5:2A": "Linksys",   "00:14:BF": "Linksys",
+    "00:1E:E5": "Cisco",     "00:17:94": "Cisco",
+    "B8:27:EB": "Raspberry Pi", "DC:A6:32": "Raspberry Pi",
+    "FC:EC:DA": "Ubiquiti",  "44:D9:E7": "Ubiquiti",
+    "04:18:D6": "Apple",     "AC:BC:32": "Apple",     "F0:18:98": "Apple",
+    "00:1A:2B": "Intel",     "00:23:14": "Belkin",
+}
+
+def oui_vendor(bssid: str) -> str:
+    return OUI_VENDORS.get(bssid[:8].upper(), "Unknown")
+
+
+# ── Signal helpers ─────────────────────────────────────────────────────────────
+def dbm_to_quality(dbm: int) -> int:
+    return max(0, min(100, 2 * (dbm + 100)))
+
+def signal_label(dbm: int) -> str:
+    if dbm >= -50: return "Excellent"
+    if dbm >= -65: return "Good"
+    if dbm >= -75: return "Fair"
+    return "Poor"
+
+def signal_color(dbm: int) -> QColor:
+    if dbm >= -50: return QColor("#3fb950")
+    if dbm >= -65: return QColor("#79c0ff")
+    if dbm >= -75: return QColor("#d29922")
+    return QColor("#f85149")
+
+
+# ── Interface detection ────────────────────────────────────────────────────────
+def get_interfaces() -> list:
     try:
-        result = subprocess.run(
-            ["iwconfig"],
-            capture_output=True, text=True, timeout=5
-        )
-        ifaces = re.findall(r'^(\w+)\s+IEEE', result.stdout, re.MULTILINE)
+        r = subprocess.run(["iwconfig"], capture_output=True, text=True, timeout=5)
+        ifaces = re.findall(r'^(\w+)\s+IEEE', r.stdout, re.MULTILINE)
         if ifaces:
             return ifaces
     except Exception:
         pass
-    # fallback: read /proc/net/wireless
     try:
         with open("/proc/net/wireless") as f:
-            lines = f.readlines()[2:]
-        return [l.split(":")[0].strip() for l in lines if ":" in l]
+            return [l.split(":")[0].strip() for l in f.readlines()[2:] if ":" in l]
     except Exception:
         pass
     return ["wlan0"]
 
 
-def parse_iwlist(output: str) -> list[dict]:
-    """Parse raw iwlist scan output into a list of network dicts."""
+# ── iwlist parser ──────────────────────────────────────────────────────────────
+def parse_iwlist(output: str) -> list:
     networks = []
-    cells = re.split(r'(?=Cell \d+ - Address:)', output)
-    for cell in cells:
+    for cell in re.split(r'(?=Cell \d+ - Address:)', output):
         if "Address:" not in cell:
             continue
-        net = {}
+        n = {}
 
         m = re.search(r'Address:\s*([0-9A-Fa-f:]{17})', cell)
-        net["bssid"] = m.group(1).upper() if m else "Unknown"
+        n["bssid"] = m.group(1).upper() if m else "Unknown"
 
         m = re.search(r'ESSID:"([^"]*)"', cell)
-        net["essid"] = m.group(1) if m else "<hidden>"
+        n["essid"] = m.group(1) if m else ""
 
         m = re.search(r'Frequency:([\d.]+)\s*GHz', cell)
-        net["frequency"] = m.group(1) + " GHz" if m else "?"
+        n["frequency"] = m.group(1) + " GHz" if m else "?"
 
-        m = re.search(r'Channel:(\d+)', cell)
-        if not m:
-            m = re.search(r'\(Channel (\d+)\)', cell)
-        net["channel"] = m.group(1) if m else "?"
+        m = re.search(r'Channel:(\d+)', cell) or re.search(r'\(Channel (\d+)\)', cell)
+        n["channel"] = int(m.group(1)) if m else 0
 
         m = re.search(r'Signal level=(-?\d+)\s*dBm', cell)
         if m:
-            net["signal_dbm"] = int(m.group(1))
+            n["signal_dbm"] = int(m.group(1))
         else:
             m = re.search(r'Signal level=(\d+)/100', cell)
-            if m:
-                net["signal_dbm"] = int(m.group(1)) - 100
-            else:
-                net["signal_dbm"] = -100
+            n["signal_dbm"] = int(m.group(1)) - 100 if m else -100
 
         m = re.search(r'Noise level=(-?\d+)\s*dBm', cell)
-        net["noise_dbm"] = int(m.group(1)) if m else None
+        n["noise_dbm"] = int(m.group(1)) if m else None
 
-        m = re.search(r'Quality=(\d+)/(\d+)', cell)
-        if m:
-            net["quality"] = round(int(m.group(1)) / int(m.group(2)) * 100)
-        else:
-            dbm = net["signal_dbm"]
-            net["quality"] = max(0, min(100, 2 * (dbm + 100)))
+        n["quality"] = dbm_to_quality(n["signal_dbm"])
 
-        encryption_lines = re.findall(r'Encryption key:(on|off)', cell)
-        ie_wpa = re.findall(r'IE:.*WPA', cell)
-        ie_wpa2 = re.findall(r'IE:.*WPA2|IE:.*RSN', cell)
-        if ie_wpa2:
-            net["encryption"] = "WPA2"
-        elif ie_wpa:
-            net["encryption"] = "WPA"
-        elif encryption_lines and encryption_lines[0] == "on":
-            net["encryption"] = "WEP"
-        else:
-            net["encryption"] = "Open"
+        wpa2 = re.search(r'IE:.*WPA2|IE:.*RSN', cell)
+        wpa  = re.search(r'IE:.*WPA', cell)
+        enc  = re.search(r'Encryption key:(on|off)', cell)
+        if wpa2:              n["encryption"] = "WPA2"
+        elif wpa:             n["encryption"] = "WPA"
+        elif enc and enc.group(1) == "on": n["encryption"] = "WEP"
+        else:                 n["encryption"] = "Open"
 
         rates = re.findall(r'(\d+\.?\d*) Mb/s', cell)
-        net["max_rate"] = max((float(r) for r in rates), default=0)
-        net["max_rate_str"] = f"{int(net['max_rate'])} Mbps" if net["max_rate"] else "?"
+        n["max_rate"] = max((float(r) for r in rates), default=0)
 
-        net["mode"] = "Master"
-        m = re.search(r'Mode:(\w+)', cell)
-        if m:
-            net["mode"] = m.group(1)
-
-        net["vendor"] = bssid_to_vendor(net["bssid"])
-        net["band"] = "5 GHz" if net["frequency"].startswith("5") else "2.4 GHz"
-        net["last_seen"] = datetime.now().strftime("%H:%M:%S")
-
-        networks.append(net)
+        n["band"]      = "5 GHz" if n["frequency"].startswith("5") else "2.4 GHz"
+        n["vendor"]    = oui_vendor(n["bssid"])
+        n["last_seen"] = datetime.now().strftime("%H:%M:%S")
+        networks.append(n)
     return networks
 
 
-_VENDOR_OUI = {
-    "00:50:F2": "Microsoft",
-    "00:1A:2B": "Intel",
-    "00:23:14": "Belkin",
-    "18:D6:C7": "TP-Link",
-    "A4:2B:B0": "TP-Link",
-    "EC:08:6B": "TP-Link",
-    "00:90:4C": "Epigram",
-    "8C:59:C3": "Netgear",
-    "A0:04:60": "Netgear",
-    "28:80:88": "Netgear",
-    "20:E5:2A": "Linksys",
-    "00:14:BF": "Linksys",
-    "00:1E:E5": "Cisco",
-    "00:17:94": "Cisco",
-    "B8:27:EB": "Raspberry Pi",
-    "DC:A6:32": "Raspberry Pi",
-    "E4:5F:01": "Raspberry Pi",
-    "00:11:22": "Cimsys",
-    "FC:EC:DA": "Ubiquiti",
-    "44:D9:E7": "Ubiquiti",
-    "04:18:D6": "Apple",
-    "AC:BC:32": "Apple",
-    "F0:18:98": "Apple",
-}
+# ── Signal bar widget ──────────────────────────────────────────────────────────
+class SignalBarsWidget(QWidget):
+    def __init__(self, dbm: int = -100, parent=None):
+        super().__init__(parent)
+        self.dbm = dbm
+        self.setFixedSize(36, 22)
 
-def bssid_to_vendor(bssid: str) -> str:
-    oui = bssid[:8].upper()
-    return _VENDOR_OUI.get(oui, "Unknown")
+    def set_dbm(self, dbm: int):
+        self.dbm = dbm
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        quality = dbm_to_quality(self.dbm)
+        color   = signal_color(self.dbm)
+        dim     = QColor("#3a3f47")
+        bar_w, gap = 6, 3
+        heights = [6, 10, 14, 20]
+        thresholds = [25, 50, 75, 100]
+        for i, (h, thresh) in enumerate(zip(heights, thresholds)):
+            x = i * (bar_w + gap)
+            y = self.height() - h
+            c = color if quality >= thresh else dim
+            p.setBrush(QBrush(c))
+            p.setPen(Qt.NoPen)
+            p.drawRoundedRect(x, y, bar_w, h, 2, 2)
 
 
-def signal_color(dbm: int) -> str:
-    if dbm >= -50:
-        return ACCENT_GREEN
-    elif dbm >= -65:
-        return ACCENT_CYAN
-    elif dbm >= -75:
-        return ACCENT_YELLOW
-    else:
-        return ACCENT_RED
+# ── Sparkline widget ───────────────────────────────────────────────────────────
+class SparklineWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.history = []
+        self.setMinimumHeight(60)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_history(self, history: list):
+        self.history = list(history)
+        self.update()
+
+    def paintEvent(self, event):
+        if len(self.history) < 2:
+            p = QPainter(self)
+            p.setPen(QColor("#484f58"))
+            p.drawText(self.rect(), Qt.AlignCenter, "No history yet")
+            return
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        pad = 6
+
+        mn = min(self.history) - 3
+        mx = max(self.history) + 3
+        rng = mx - mn or 1
+
+        def px(i):
+            return pad + int(i / (len(self.history) - 1) * (w - 2 * pad))
+
+        def py(v):
+            return pad + int((1 - (v - mn) / rng) * (h - 2 * pad))
+
+        pts = [QPoint(px(i), py(v)) for i, v in enumerate(self.history)]
+
+        # Fill area
+        last_dbm = self.history[-1]
+        base_color = signal_color(last_dbm)
+        fill = QColor(base_color)
+        fill.setAlpha(40)
+
+        from PyQt5.QtGui import QPolygon
+        poly_pts = [QPoint(pts[0].x(), h)] + pts + [QPoint(pts[-1].x(), h)]
+        poly = QPolygon(poly_pts)
+        p.setBrush(QBrush(fill))
+        p.setPen(Qt.NoPen)
+        p.drawPolygon(poly)
+
+        # Line
+        pen = QPen(base_color, 2)
+        p.setPen(pen)
+        for i in range(len(pts) - 1):
+            p.drawLine(pts[i], pts[i + 1])
+
+        # End dot
+        p.setBrush(QBrush(base_color))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(pts[-1], 4, 4)
+
+        # dBm labels
+        p.setPen(QColor("#8b949e"))
+        p.setFont(QFont("Monospace", 7))
+        p.drawText(QRect(0, 0, w, 14), Qt.AlignRight, f"{mx:.0f} dBm")
+        p.drawText(QRect(0, h - 14, w, 14), Qt.AlignRight, f"{mn:.0f} dBm")
 
 
-def signal_label(dbm: int) -> str:
-    if dbm >= -50:
-        return "Excellent"
-    elif dbm >= -65:
-        return "Good"
-    elif dbm >= -75:
-        return "Fair"
-    else:
-        return "Poor"
+# ── Scan worker thread ─────────────────────────────────────────────────────────
+class ScanWorker(QThread):
+    finished = pyqtSignal(list)
+    error    = pyqtSignal(str)
+
+    def __init__(self, iface: str):
+        super().__init__()
+        self.iface = iface
+
+    def run(self):
+        try:
+            r = subprocess.run(
+                ["iwlist", self.iface, "scan"],
+                capture_output=True, text=True, timeout=20,
+            )
+            out = r.stdout + r.stderr
+        except subprocess.TimeoutExpired:
+            self.error.emit("Scan timed out.")
+            return
+        except FileNotFoundError:
+            self.error.emit("iwlist not found. Install: sudo apt install wireless-tools")
+            return
+        except Exception as ex:
+            self.error.emit(str(ex))
+            return
+
+        if "Interface doesn't support scanning" in out:
+            self.error.emit(f"{self.iface} does not support scanning.")
+            return
+
+        self.finished.emit(parse_iwlist(out))
 
 
-def draw_signal_bars(canvas, x, y, dbm, bar_w=4, bar_gap=2, max_h=16):
-    """Draw 4 signal strength bars on a canvas."""
-    canvas.delete("all")
-    quality = max(0, min(100, 2 * (dbm + 100)))
-    levels = [25, 50, 75, 100]
-    color = signal_color(dbm)
-    for i, threshold in enumerate(levels):
-        h = int(max_h * (i + 1) / 4)
-        bx = x + i * (bar_w + bar_gap)
-        by_top = y + max_h - h
-        fill = color if quality >= threshold else TEXT_DIM
-        canvas.create_rectangle(bx, by_top, bx + bar_w, y + max_h, fill=fill, outline="")
+# ── Detail panel ───────────────────────────────────────────────────────────────
+class DetailPanel(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.history = {}
+        self._build()
+
+    def _build(self):
+        self.setMinimumWidth(300)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Color accent bar
+        self.accent_bar = QFrame()
+        self.accent_bar.setFixedHeight(4)
+        self.accent_bar.setStyleSheet("background:#58a6ff;")
+        root.addWidget(self.accent_bar)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        root.addWidget(scroll)
+
+        container = QWidget()
+        scroll.setWidget(container)
+        self.layout_inner = QVBoxLayout(container)
+        self.layout_inner.setContentsMargins(16, 16, 16, 16)
+        self.layout_inner.setSpacing(12)
+
+        # Placeholder
+        self.placeholder = QLabel("Select a network\nto view details")
+        self.placeholder.setAlignment(Qt.AlignCenter)
+        self.placeholder.setStyleSheet("color:#484f58; font-size:13px;")
+        self.layout_inner.addWidget(self.placeholder)
+        self.layout_inner.addStretch()
+
+        self._content_widgets = []
+
+    def clear(self):
+        for w in self._content_widgets:
+            self.layout_inner.removeWidget(w)
+            w.deleteLater()
+        self._content_widgets = []
+        # remove stretch
+        while self.layout_inner.count():
+            item = self.layout_inner.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.placeholder = QLabel("Select a network\nto view details")
+        self.placeholder.setAlignment(Qt.AlignCenter)
+        self.placeholder.setStyleSheet("color:#484f58; font-size:13px;")
+        self.layout_inner.addWidget(self.placeholder)
+        self.layout_inner.addStretch()
+
+    def show_network(self, n: dict, history: list):
+        # Clear old content
+        while self.layout_inner.count():
+            item = self.layout_inner.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        dbm   = n["signal_dbm"]
+        color = signal_color(dbm)
+        self.accent_bar.setStyleSheet(f"background:{color.name()};")
+
+        # SSID
+        essid = n["essid"] or "<hidden>"
+        lbl_ssid = QLabel(essid)
+        lbl_ssid.setStyleSheet("font-size:16px; font-weight:bold; color:#e6edf3;")
+        lbl_ssid.setWordWrap(True)
+        self.layout_inner.addWidget(lbl_ssid)
+
+        lbl_bssid = QLabel(n["bssid"])
+        lbl_bssid.setStyleSheet("font-family:monospace; font-size:11px; color:#8b949e;")
+        self.layout_inner.addWidget(lbl_bssid)
+
+        # Signal strength row
+        sig_frame = QFrame()
+        sig_frame.setStyleSheet("background:#1c2128; border-radius:8px;")
+        sig_layout = QHBoxLayout(sig_frame)
+        sig_layout.setContentsMargins(14, 10, 14, 10)
+
+        bars = SignalBarsWidget(dbm)
+        bars.setFixedSize(44, 30)
+        sig_layout.addWidget(bars)
+
+        dbm_lbl = QLabel(f"{dbm} dBm")
+        dbm_lbl.setStyleSheet(f"font-size:24px; font-weight:bold; color:{color.name()};")
+        sig_layout.addWidget(dbm_lbl)
+
+        qlbl = QLabel(signal_label(dbm))
+        qlbl.setStyleSheet(f"font-size:12px; color:{color.name()};")
+        sig_layout.addWidget(qlbl)
+        sig_layout.addStretch()
+        self.layout_inner.addWidget(sig_frame)
+
+        # Quality progress bar
+        q_row = QVBoxLayout()
+        q_row.setSpacing(3)
+        q_lbl = QLabel(f"Signal Quality: {n['quality']}%")
+        q_lbl.setStyleSheet("font-size:11px; color:#8b949e;")
+        q_row.addWidget(q_lbl)
+
+        qbar = QProgressBar()
+        qbar.setValue(n["quality"])
+        qbar.setTextVisible(False)
+        qbar.setFixedHeight(8)
+        qbar.setStyleSheet(f"""
+            QProgressBar {{
+                background:#21262d; border-radius:4px; border:none;
+            }}
+            QProgressBar::chunk {{
+                background:{color.name()}; border-radius:4px;
+            }}
+        """)
+        q_row.addWidget(qbar)
+        q_widget = QWidget()
+        q_widget.setLayout(q_row)
+        self.layout_inner.addWidget(q_widget)
+
+        # Divider
+        self.layout_inner.addWidget(self._divider())
+
+        # Details grid
+        fields = [
+            ("Band",      n["band"]),
+            ("Channel",   str(n["channel"])),
+            ("Frequency", n["frequency"]),
+            ("Security",  n["encryption"]),
+            ("Max Rate",  f"{int(n['max_rate'])} Mbps" if n["max_rate"] else "?"),
+            ("Vendor",    n["vendor"]),
+            ("Last Seen", n["last_seen"]),
+        ]
+        if n["noise_dbm"] is not None:
+            fields.insert(3, ("Noise", f"{n['noise_dbm']} dBm"))
+
+        grid_widget = QWidget()
+        grid_layout = QVBoxLayout(grid_widget)
+        grid_layout.setSpacing(6)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+
+        for label, value in fields:
+            row = QHBoxLayout()
+            l = QLabel(label)
+            l.setFixedWidth(80)
+            l.setStyleSheet("font-size:11px; color:#8b949e;")
+            v = QLabel(value)
+            v.setStyleSheet("font-size:11px; font-family:monospace; color:#e6edf3;")
+            v.setWordWrap(True)
+            row.addWidget(l)
+            row.addWidget(v, 1)
+            w = QWidget()
+            w.setLayout(row)
+            grid_layout.addWidget(w)
+
+        self.layout_inner.addWidget(grid_widget)
+
+        # Sparkline
+        if len(history) >= 2:
+            self.layout_inner.addWidget(self._divider())
+            spark_lbl = QLabel("Signal History")
+            spark_lbl.setStyleSheet("font-size:11px; color:#8b949e;")
+            self.layout_inner.addWidget(spark_lbl)
+
+            spark = SparklineWidget()
+            spark.set_history(history)
+            self.layout_inner.addWidget(spark)
+
+        self.layout_inner.addStretch()
+
+    def _divider(self) -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("color:#30363d;")
+        return line
 
 
-# ── Main Application ───────────────────────────────────────────────────────────
+# ── Main window ────────────────────────────────────────────────────────────────
+class MainWindow(QMainWindow):
+    COLUMNS = [
+        ("signal",     "Signal",      90),
+        ("essid",      "ESSID",      180),
+        ("bssid",      "BSSID",      150),
+        ("band",       "Band",        70),
+        ("channel",    "CH",          45),
+        ("encryption", "Security",    80),
+        ("quality",    "Quality",     80),
+        ("max_rate",   "Max Rate",    80),
+        ("vendor",     "Vendor",     110),
+        ("last_seen",  "Last Seen",   75),
+    ]
 
-class WiFiAnalyzer(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("WiFi Network Analyzer")
-        self.geometry("1200x750")
-        self.minsize(900, 600)
-        self.configure(bg=BG_DARK)
-        self.resizable(True, True)
+        self.setWindowTitle("ESSIDScan — WiFi Network Analyzer")
+        self.resize(1280, 780)
+        self.setMinimumSize(900, 600)
 
-        # State
-        self.interfaces      = get_interfaces()
-        self.selected_iface  = tk.StringVar(value=self.interfaces[0] if self.interfaces else "wlan0")
-        self.auto_scan       = tk.BooleanVar(value=False)
-        self.scan_interval   = tk.IntVar(value=5)
-        self.networks        = {}          # bssid → dict
-        self.history         = defaultdict(list)  # bssid → [dbm, ...]
-        self.sort_col        = "signal_dbm"
-        self.sort_reverse    = True
-        self.filter_text     = tk.StringVar()
-        self.filter_band     = tk.StringVar(value="All")
-        self.filter_enc      = tk.StringVar(value="All")
-        self._scan_thread    = None
-        self._auto_job       = None
-        self._scanning       = False
-        self.selected_bssid  = None
+        self.networks  = {}
+        self.history   = defaultdict(list)
+        self._worker   = None
+        self._auto_timer = QTimer(self)
+        self._auto_timer.timeout.connect(self._start_scan)
 
+        self._apply_stylesheet()
         self._build_ui()
-        self._check_privileges()
+        self._check_root()
 
-    # ── Privilege check ────────────────────────────────────────────────────────
+    # ── Stylesheet ─────────────────────────────────────────────────────────────
+    def _apply_stylesheet(self):
+        self.setStyleSheet("""
+        QMainWindow, QWidget {
+            background: #0d1117;
+            color: #e6edf3;
+            font-family: 'Segoe UI', 'Ubuntu', sans-serif;
+            font-size: 12px;
+        }
+        QToolBar {
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            spacing: 4px;
+            padding: 4px 8px;
+        }
+        QToolBar QLabel {
+            color: #8b949e;
+            font-size: 11px;
+        }
+        QPushButton {
+            background: #21262d;
+            color: #e6edf3;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 5px 14px;
+            font-size: 12px;
+        }
+        QPushButton:hover  { background: #30363d; border-color: #58a6ff; }
+        QPushButton:pressed { background: #161b22; }
+        QPushButton#btn_scan {
+            background: #1f6feb;
+            color: #ffffff;
+            border: none;
+            font-weight: bold;
+        }
+        QPushButton#btn_scan:hover  { background: #388bfd; }
+        QPushButton#btn_scan:pressed { background: #1158c7; }
+        QPushButton#btn_auto_on {
+            background: #1a3a1a;
+            color: #3fb950;
+            border: 1px solid #3fb950;
+            font-weight: bold;
+        }
+        QPushButton#btn_auto_on:hover { background: #1f4a1f; }
+        QPushButton#btn_clear {
+            background: #2d1117;
+            color: #f85149;
+            border: 1px solid #f85149;
+        }
+        QPushButton#btn_clear:hover { background: #3d1a1a; }
+        QComboBox {
+            background: #21262d;
+            color: #e6edf3;
+            border: 1px solid #30363d;
+            border-radius: 5px;
+            padding: 4px 8px;
+            min-width: 90px;
+        }
+        QComboBox:hover { border-color: #58a6ff; }
+        QComboBox::drop-down { border: none; width: 20px; }
+        QComboBox::down-arrow { image: none; border: none; }
+        QComboBox QAbstractItemView {
+            background: #161b22;
+            color: #e6edf3;
+            selection-background-color: #1f6feb;
+            border: 1px solid #30363d;
+        }
+        QLineEdit {
+            background: #21262d;
+            color: #e6edf3;
+            border: 1px solid #30363d;
+            border-radius: 5px;
+            padding: 4px 10px;
+        }
+        QLineEdit:focus { border-color: #58a6ff; }
+        QSpinBox {
+            background: #21262d;
+            color: #e6edf3;
+            border: 1px solid #30363d;
+            border-radius: 5px;
+            padding: 4px 6px;
+        }
+        QSpinBox::up-button, QSpinBox::down-button {
+            background: #30363d;
+            border: none;
+            width: 16px;
+        }
+        QTableWidget {
+            background: #161b22;
+            color: #e6edf3;
+            gridline-color: #21262d;
+            border: none;
+            font-size: 12px;
+            selection-background-color: #1f6feb;
+        }
+        QTableWidget::item { padding: 4px 8px; border: none; }
+        QTableWidget::item:hover { background: #21262d; }
+        QTableWidget::item:selected { background: #1f6feb; color: #ffffff; }
+        QHeaderView::section {
+            background: #1c2128;
+            color: #8b949e;
+            border: none;
+            border-right: 1px solid #30363d;
+            border-bottom: 1px solid #30363d;
+            padding: 6px 8px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        QHeaderView::section:hover { background: #21262d; color: #e6edf3; }
+        QScrollBar:vertical {
+            background: #0d1117;
+            width: 8px;
+            border: none;
+        }
+        QScrollBar::handle:vertical {
+            background: #30363d;
+            border-radius: 4px;
+            min-height: 20px;
+        }
+        QScrollBar::handle:vertical:hover { background: #484f58; }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+        QScrollBar:horizontal {
+            background: #0d1117;
+            height: 8px;
+            border: none;
+        }
+        QScrollBar::handle:horizontal {
+            background: #30363d;
+            border-radius: 4px;
+            min-width: 20px;
+        }
+        QScrollBar::handle:horizontal:hover { background: #484f58; }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+        QStatusBar {
+            background: #161b22;
+            color: #8b949e;
+            border-top: 1px solid #30363d;
+            font-size: 11px;
+            padding: 0 8px;
+        }
+        QSplitter::handle { background: #30363d; width: 1px; }
+        QFrame#detail_panel {
+            background: #161b22;
+            border-left: 1px solid #30363d;
+        }
+        """)
 
-    def _check_privileges(self):
-        if os.geteuid() != 0:
-            self._status("Warning: not running as root — scan may fail. Try: sudo python3 wifi_analyzer.py", ACCENT_YELLOW)
-
-    # ── UI Construction ────────────────────────────────────────────────────────
-
+    # ── UI construction ─────────────────────────────────────────────────────────
     def _build_ui(self):
-        self._build_titlebar()
         self._build_toolbar()
-        self._build_main()
+        self._build_central()
         self._build_statusbar()
 
-    def _build_titlebar(self):
-        bar = tk.Frame(self, bg=BG_PANEL, height=48)
-        bar.pack(fill="x", side="top")
-        bar.pack_propagate(False)
+    def _build_toolbar(self):
+        tb = QToolBar("Main", self)
+        tb.setMovable(False)
+        tb.setIconSize(QSize(16, 16))
+        self.addToolBar(tb)
 
-        icon = tk.Label(bar, text="⬡", font=("Segoe UI", 20), fg=ACCENT_BLUE, bg=BG_PANEL)
-        icon.pack(side="left", padx=(14, 4), pady=6)
+        # Interface
+        tb.addWidget(QLabel("  Interface:"))
+        self.iface_combo = QComboBox()
+        self.iface_combo.addItems(get_interfaces())
+        self.iface_combo.setFixedWidth(100)
+        tb.addWidget(self.iface_combo)
 
-        title = tk.Label(bar, text="WiFi Network Analyzer", font=("Segoe UI", 13, "bold"),
-                         fg=TEXT_PRIMARY, bg=BG_PANEL)
-        title.pack(side="left", pady=6)
+        tb.addSeparator()
 
-        subtitle = tk.Label(bar, text="  iwlist monitor", font=("Segoe UI", 9),
-                            fg=TEXT_MUTED, bg=BG_PANEL)
-        subtitle.pack(side="left", pady=6)
+        # Scan
+        self.btn_scan = QPushButton("  Scan")
+        self.btn_scan.setObjectName("btn_scan")
+        self.btn_scan.setFixedHeight(30)
+        self.btn_scan.clicked.connect(self._start_scan)
+        tb.addWidget(self.btn_scan)
 
-        # Clock
-        self._clock_var = tk.StringVar()
-        clock = tk.Label(bar, textvariable=self._clock_var, font=("Courier", 10),
-                         fg=TEXT_MUTED, bg=BG_PANEL)
-        clock.pack(side="right", padx=16)
+        # Auto
+        self.btn_auto = QPushButton("  Auto Scan")
+        self.btn_auto.setCheckable(True)
+        self.btn_auto.setFixedHeight(30)
+        self.btn_auto.toggled.connect(self._toggle_auto)
+        tb.addWidget(self.btn_auto)
+
+        tb.addWidget(QLabel("  every"))
+        self.spin_interval = QSpinBox()
+        self.spin_interval.setRange(2, 120)
+        self.spin_interval.setValue(10)
+        self.spin_interval.setSuffix(" s")
+        self.spin_interval.setFixedWidth(70)
+        tb.addWidget(self.spin_interval)
+
+        tb.addSeparator()
+
+        # Clear
+        self.btn_clear = QPushButton("  Clear")
+        self.btn_clear.setObjectName("btn_clear")
+        self.btn_clear.setFixedHeight(30)
+        self.btn_clear.clicked.connect(self._clear)
+        tb.addWidget(self.btn_clear)
+
+        tb.addSeparator()
+
+        # Filters
+        tb.addWidget(QLabel("  Band:"))
+        self.combo_band = QComboBox()
+        self.combo_band.addItems(["All", "2.4 GHz", "5 GHz"])
+        self.combo_band.setFixedWidth(80)
+        self.combo_band.currentIndexChanged.connect(self._refresh_table)
+        tb.addWidget(self.combo_band)
+
+        tb.addWidget(QLabel("  Security:"))
+        self.combo_enc = QComboBox()
+        self.combo_enc.addItems(["All", "Open", "WEP", "WPA", "WPA2"])
+        self.combo_enc.setFixedWidth(75)
+        self.combo_enc.currentIndexChanged.connect(self._refresh_table)
+        tb.addWidget(self.combo_enc)
+
+        tb.addWidget(QLabel("  Search:"))
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("ESSID / BSSID / Vendor…")
+        self.search_box.setFixedWidth(200)
+        self.search_box.textChanged.connect(self._refresh_table)
+        tb.addWidget(self.search_box)
+
+        # Spacer
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+
+        self.lbl_count = QLabel("0 networks")
+        self.lbl_count.setStyleSheet("color:#79c0ff; font-weight:bold; margin-right:12px;")
+        tb.addWidget(self.lbl_count)
+
+    def _build_central(self):
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(1)
+
+        # ── Left: network table ──────────────────────────────────────────────
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels([c[1] for c in self.COLUMNS])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setShowGrid(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSortingEnabled(True)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setSectionsMovable(True)
+        self.table.horizontalHeader().setSortIndicatorShown(True)
+        self.table.setAlternatingRowColors(True)
+        self.table.setStyleSheet(
+            self.table.styleSheet() +
+            "QTableWidget { alternate-background-color: #1c2128; }"
+        )
+
+        for i, (_, _, w) in enumerate(self.COLUMNS):
+            self.table.setColumnWidth(i, w)
+
+        self.table.horizontalHeader().setSectionResizeMode(
+            self._col("essid"), QHeaderView.Stretch
+        )
+
+        self.table.itemSelectionChanged.connect(self._on_select)
+        left_layout.addWidget(self.table)
+        splitter.addWidget(left)
+
+        # ── Right: detail panel ──────────────────────────────────────────────
+        self.detail = DetailPanel()
+        self.detail.setObjectName("detail_panel")
+        self.detail.setMinimumWidth(300)
+        splitter.addWidget(self.detail)
+
+        splitter.setSizes([900, 360])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+
+        self.setCentralWidget(splitter)
+
+    def _build_statusbar(self):
+        sb = QStatusBar()
+        self.setStatusBar(sb)
+
+        self.status_label = QLabel("Ready. Press Scan to start.")
+        sb.addWidget(self.status_label, 1)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)       # indeterminate
+        self.progress_bar.setFixedWidth(140)
+        self.progress_bar.setFixedHeight(10)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                background: #21262d;
+                border-radius: 5px;
+                border: none;
+            }
+            QProgressBar::chunk {
+                background: #58a6ff;
+                border-radius: 5px;
+            }
+        """)
+        sb.addPermanentWidget(self.progress_bar)
+
+        self.clock_label = QLabel()
+        self.clock_label.setStyleSheet("color:#484f58; font-family:monospace;")
+        sb.addPermanentWidget(self.clock_label)
+
+        timer = QTimer(self)
+        timer.timeout.connect(self._tick_clock)
+        timer.start(1000)
         self._tick_clock()
 
     def _tick_clock(self):
-        self._clock_var.set(datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
-        self.after(1000, self._tick_clock)
+        self.clock_label.setText(datetime.now().strftime("  %Y-%m-%d  %H:%M:%S  "))
 
-    def _build_toolbar(self):
-        bar = tk.Frame(self, bg=BG_CARD, height=48)
-        bar.pack(fill="x", side="top")
-        bar.pack_propagate(False)
+    # ── Helpers ─────────────────────────────────────────────────────────────────
+    def _col(self, key: str) -> int:
+        return next(i for i, (k, _, _) in enumerate(self.COLUMNS) if k == key)
 
-        def sep():
-            tk.Frame(bar, bg=BORDER, width=1).pack(side="left", fill="y", padx=8, pady=8)
-
-        # Interface selector
-        tk.Label(bar, text="Interface:", fg=TEXT_MUTED, bg=BG_CARD,
-                 font=("Segoe UI", 9)).pack(side="left", padx=(12, 4))
-        iface_cb = ttk.Combobox(bar, textvariable=self.selected_iface,
-                                values=self.interfaces, width=10,
-                                state="readonly", font=("Segoe UI", 9))
-        iface_cb.pack(side="left")
-        self._style_combobox()
-
-        sep()
-
-        # Scan button
-        self._scan_btn = self._toolbar_btn(bar, "  Scan", ACCENT_BLUE, self._start_scan)
-        self._scan_btn.pack(side="left", padx=4)
-
-        # Auto-scan toggle
-        self._auto_btn = self._toolbar_btn(bar, "  Auto OFF", TEXT_MUTED, self._toggle_auto)
-        self._auto_btn.pack(side="left", padx=4)
-
-        # Interval
-        tk.Label(bar, text="every", fg=TEXT_MUTED, bg=BG_CARD,
-                 font=("Segoe UI", 9)).pack(side="left", padx=(4, 2))
-        spin = tk.Spinbox(bar, from_=2, to=60, textvariable=self.scan_interval,
-                          width=3, font=("Segoe UI", 9),
-                          bg=BG_HOVER, fg=TEXT_PRIMARY, insertbackground=TEXT_PRIMARY,
-                          relief="flat", buttonbackground=BG_HOVER)
-        spin.pack(side="left")
-        tk.Label(bar, text="s", fg=TEXT_MUTED, bg=BG_CARD,
-                 font=("Segoe UI", 9)).pack(side="left", padx=(2, 4))
-
-        sep()
-
-        # Clear button
-        self._toolbar_btn(bar, "  Clear", ACCENT_RED, self._clear).pack(side="left", padx=4)
-
-        sep()
-
-        # Filters
-        tk.Label(bar, text="Band:", fg=TEXT_MUTED, bg=BG_CARD,
-                 font=("Segoe UI", 9)).pack(side="left", padx=(4, 2))
-        band_cb = ttk.Combobox(bar, textvariable=self.filter_band,
-                               values=["All", "2.4 GHz", "5 GHz"], width=8,
-                               state="readonly", font=("Segoe UI", 9))
-        band_cb.pack(side="left")
-        band_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_table())
-
-        tk.Label(bar, text="  Enc:", fg=TEXT_MUTED, bg=BG_CARD,
-                 font=("Segoe UI", 9)).pack(side="left", padx=(4, 2))
-        enc_cb = ttk.Combobox(bar, textvariable=self.filter_enc,
-                              values=["All", "Open", "WEP", "WPA", "WPA2"], width=7,
-                              state="readonly", font=("Segoe UI", 9))
-        enc_cb.pack(side="left")
-        enc_cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_table())
-
-        sep()
-
-        # Search
-        tk.Label(bar, text="Search:", fg=TEXT_MUTED, bg=BG_CARD,
-                 font=("Segoe UI", 9)).pack(side="left", padx=(4, 2))
-        search = tk.Entry(bar, textvariable=self.filter_text, width=18,
-                          font=("Segoe UI", 9), bg=BG_HOVER, fg=TEXT_PRIMARY,
-                          insertbackground=TEXT_PRIMARY, relief="flat",
-                          highlightthickness=1, highlightbackground=BORDER,
-                          highlightcolor=ACCENT_BLUE)
-        search.pack(side="left")
-        self.filter_text.trace_add("write", lambda *_: self._refresh_table())
-
-        # Network count badge
-        self._count_var = tk.StringVar(value="0 networks")
-        tk.Label(bar, textvariable=self._count_var, fg=ACCENT_CYAN, bg=BG_CARD,
-                 font=("Segoe UI", 9, "bold")).pack(side="right", padx=12)
-
-    def _toolbar_btn(self, parent, text, color, cmd):
-        btn = tk.Label(parent, text=text, fg=color, bg=BG_HOVER,
-                       font=("Segoe UI", 9, "bold"), padx=10, pady=5,
-                       cursor="hand2", relief="flat")
-        btn.bind("<Button-1>", lambda e: cmd())
-        btn.bind("<Enter>", lambda e: btn.configure(bg=BG_CARD))
-        btn.bind("<Leave>", lambda e: btn.configure(bg=BG_HOVER))
-        return btn
-
-    def _style_combobox(self):
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("TCombobox",
-                        fieldbackground=BG_HOVER, background=BG_HOVER,
-                        foreground=TEXT_PRIMARY, selectbackground=ACCENT_BLUE,
-                        selectforeground=TEXT_PRIMARY, arrowcolor=TEXT_MUTED,
-                        bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
-        style.map("TCombobox", fieldbackground=[("readonly", BG_HOVER)])
-
-    def _build_main(self):
-        pane = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
-                              sashwidth=4, sashrelief="flat", opaqueresize=True)
-        pane.pack(fill="both", expand=True, padx=0, pady=0)
-
-        left = tk.Frame(pane, bg=BG_DARK)
-        pane.add(left, minsize=550)
-
-        right = tk.Frame(pane, bg=BG_DARK, width=340)
-        pane.add(right, minsize=280)
-
-        self._build_table(left)
-        self._build_detail_panel(right)
-
-    def _build_table(self, parent):
-        hdr = tk.Frame(parent, bg=BG_DARK)
-        hdr.pack(fill="x", padx=8, pady=(8, 0))
-        tk.Label(hdr, text="Networks", font=("Segoe UI", 10, "bold"),
-                 fg=TEXT_PRIMARY, bg=BG_DARK).pack(side="left")
-
-        # Treeview
-        cols = ("signal", "essid", "bssid", "band", "channel",
-                "encryption", "quality", "rate", "vendor", "last_seen")
-        col_labels = {
-            "signal":     "Signal",
-            "essid":      "ESSID / Network Name",
-            "bssid":      "BSSID / MAC",
-            "band":       "Band",
-            "channel":    "CH",
-            "encryption": "Security",
-            "quality":    "Quality",
-            "rate":       "Max Rate",
-            "vendor":     "Vendor",
-            "last_seen":  "Last Seen",
-        }
-        col_widths = {
-            "signal": 70, "essid": 180, "bssid": 140, "band": 65,
-            "channel": 40, "encryption": 70, "quality": 65, "rate": 75,
-            "vendor": 100, "last_seen": 75,
-        }
-
-        frame = tk.Frame(parent, bg=BG_DARK)
-        frame.pack(fill="both", expand=True, padx=8, pady=6)
-
-        style = ttk.Style()
-        style.configure("Dark.Treeview",
-                        background=BG_PANEL, foreground=TEXT_PRIMARY,
-                        fieldbackground=BG_PANEL, rowheight=28,
-                        font=("Courier", 9), borderwidth=0)
-        style.configure("Dark.Treeview.Heading",
-                        background=BG_CARD, foreground=TEXT_MUTED,
-                        relief="flat", font=("Segoe UI", 9, "bold"),
-                        borderwidth=0)
-        style.map("Dark.Treeview",
-                  background=[("selected", ACCENT_BLUE)],
-                  foreground=[("selected", "#fff")])
-        style.map("Dark.Treeview.Heading",
-                  background=[("active", BG_HOVER)])
-
-        vsb = ttk.Scrollbar(frame, orient="vertical")
-        hsb = ttk.Scrollbar(frame, orient="horizontal")
-
-        self.tree = ttk.Treeview(
-            frame, columns=cols, show="headings",
-            yscrollcommand=vsb.set, xscrollcommand=hsb.set,
-            style="Dark.Treeview", selectmode="browse"
-        )
-        vsb.config(command=self.tree.yview)
-        hsb.config(command=self.tree.xview)
-
-        for col in cols:
-            self.tree.heading(col, text=col_labels[col],
-                              command=lambda c=col: self._sort_by(c))
-            self.tree.column(col, width=col_widths[col], anchor="w", stretch=False)
-
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-        frame.rowconfigure(0, weight=1)
-        frame.columnconfigure(0, weight=1)
-
-        self.tree.tag_configure("excellent", foreground=ACCENT_GREEN)
-        self.tree.tag_configure("good",      foreground=ACCENT_CYAN)
-        self.tree.tag_configure("fair",      foreground=ACCENT_YELLOW)
-        self.tree.tag_configure("poor",      foreground=ACCENT_RED)
-        self.tree.tag_configure("alt",       background=BG_CARD)
-
-        self.tree.bind("<<TreeviewSelect>>", self._on_select)
-
-    def _build_detail_panel(self, parent):
-        tk.Label(parent, text="Network Details", font=("Segoe UI", 10, "bold"),
-                 fg=TEXT_PRIMARY, bg=BG_DARK).pack(anchor="w", padx=10, pady=(8, 4))
-
-        self._detail_frame = tk.Frame(parent, bg=BG_PANEL, relief="flat",
-                                      highlightthickness=1,
-                                      highlightbackground=BORDER)
-        self._detail_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-
-        self._build_detail_placeholder()
-
-    def _build_detail_placeholder(self):
-        for w in self._detail_frame.winfo_children():
-            w.destroy()
-        tk.Label(self._detail_frame,
-                 text="\n\n\nSelect a network\nto view details",
-                 font=("Segoe UI", 10), fg=TEXT_DIM, bg=BG_PANEL,
-                 justify="center").pack(expand=True)
-
-    def _build_statusbar(self):
-        bar = tk.Frame(self, bg=BG_CARD, height=26)
-        bar.pack(fill="x", side="bottom")
-        bar.pack_propagate(False)
-
-        self._progress = tk.Canvas(bar, bg=BG_CARD, highlightthickness=0,
-                                   width=120, height=6)
-        self._progress.pack(side="left", padx=(12, 6), pady=10)
-
-        self._status_var = tk.StringVar(value="Ready. Press Scan to start.")
-        tk.Label(bar, textvariable=self._status_var, fg=TEXT_MUTED, bg=BG_CARD,
-                 font=("Segoe UI", 8)).pack(side="left")
-
-        # iface info
-        self._iface_info_var = tk.StringVar()
-        tk.Label(bar, textvariable=self._iface_info_var, fg=TEXT_DIM, bg=BG_CARD,
-                 font=("Courier", 8)).pack(side="right", padx=12)
-
-    # ── Scanning logic ─────────────────────────────────────────────────────────
-
-    def _start_scan(self):
-        if self._scanning:
-            return
-        iface = self.selected_iface.get()
-        self._scanning = True
-        self._scan_btn.configure(text="  Scanning…", fg=ACCENT_YELLOW)
-        self._status(f"Scanning {iface}…", ACCENT_YELLOW)
-        self._animate_progress()
-        self._scan_thread = threading.Thread(
-            target=self._do_scan, args=(iface,), daemon=True
-        )
-        self._scan_thread.start()
-
-    def _do_scan(self, iface: str):
-        try:
-            result = subprocess.run(
-                ["iwlist", iface, "scan"],
-                capture_output=True, text=True, timeout=20
+    def _check_root(self):
+        if os.geteuid() != 0:
+            self._set_status(
+                "Not running as root — scan may fail. Try: sudo python3 wifi_analyzer.py",
+                "#d29922"
             )
-            output = result.stdout + result.stderr
-        except subprocess.TimeoutExpired:
-            self.after(0, lambda: self._scan_done([], error="Scan timed out."))
-            return
-        except FileNotFoundError:
-            self.after(0, lambda: self._scan_done([], error="iwlist not found. Install wireless-tools."))
-            return
-        except Exception as ex:
-            self.after(0, lambda: self._scan_done([], error=str(ex)))
-            return
 
-        if "Interface doesn't support scanning" in output:
-            self.after(0, lambda: self._scan_done([], error=f"{iface} doesn't support scanning."))
+    def _set_status(self, msg: str, color: str = "#8b949e"):
+        self.status_label.setText(msg)
+        self.status_label.setStyleSheet(f"color:{color};")
+
+    # ── Scanning ────────────────────────────────────────────────────────────────
+    def _start_scan(self):
+        if self._worker and self._worker.isRunning():
             return
-        if "No scan results" in output or output.strip() == "":
-            nets = []
-        else:
-            nets = parse_iwlist(output)
+        iface = self.iface_combo.currentText()
+        self.btn_scan.setEnabled(False)
+        self.btn_scan.setText("  Scanning…")
+        self.progress_bar.setVisible(True)
+        self._set_status(f"Scanning {iface}…", "#d29922")
 
-        self.after(0, lambda: self._scan_done(nets))
+        self._worker = ScanWorker(iface)
+        self._worker.finished.connect(self._scan_done)
+        self._worker.error.connect(self._scan_error)
+        self._worker.start()
 
-    def _scan_done(self, nets: list[dict], error: str = None):
-        self._scanning = False
-        self._stop_progress()
-        self._scan_btn.configure(text="  Scan", fg=ACCENT_BLUE)
+    def _scan_done(self, nets: list):
+        self.progress_bar.setVisible(False)
+        self.btn_scan.setEnabled(True)
+        self.btn_scan.setText("  Scan")
 
-        if error:
-            self._status(f"Error: {error}", ACCENT_RED)
-            messagebox.showerror("Scan Error", error)
-            return
-
-        # Merge into network dict
         for n in nets:
             bssid = n["bssid"]
             self.networks[bssid] = n
@@ -554,306 +830,177 @@ class WiFiAnalyzer(tk.Tk):
                 self.history[bssid].pop(0)
 
         self._refresh_table()
-        self._status(f"Found {len(nets)} networks  |  Total tracked: {len(self.networks)}", ACCENT_GREEN)
-        self._count_var.set(f"{len(self._visible_networks())} networks")
+        visible = self._visible_networks()
+        self._set_status(
+            f"Scan complete — {len(nets)} networks found  |  {len(self.networks)} total tracked",
+            "#3fb950"
+        )
+        self.lbl_count.setText(f"{len(visible)} networks")
 
-        # Refresh detail panel if selection is still valid
-        if self.selected_bssid and self.selected_bssid in self.networks:
-            self._show_detail(self.networks[self.selected_bssid])
+        # Refresh detail if selected network was updated
+        sel = self.table.selectedItems()
+        if sel:
+            row = self.table.row(sel[0])
+            bssid_item = self.table.item(row, self._col("bssid"))
+            if bssid_item:
+                bssid = bssid_item.text()
+                if bssid in self.networks:
+                    self.detail.show_network(
+                        self.networks[bssid], self.history[bssid]
+                    )
 
-    def _toggle_auto(self):
-        self.auto_scan.set(not self.auto_scan.get())
-        if self.auto_scan.get():
-            self._auto_btn.configure(text="  Auto ON", fg=ACCENT_GREEN)
-            self._schedule_auto()
+    def _scan_error(self, msg: str):
+        self.progress_bar.setVisible(False)
+        self.btn_scan.setEnabled(True)
+        self.btn_scan.setText("  Scan")
+        self._set_status(f"Error: {msg}", "#f85149")
+        QMessageBox.critical(self, "Scan Error", msg)
+
+    def _toggle_auto(self, checked: bool):
+        if checked:
+            self.btn_auto.setText("  Auto: ON")
+            self.btn_auto.setObjectName("btn_auto_on")
+            self.btn_auto.setStyleSheet("""
+                QPushButton {
+                    background:#1a3a1a; color:#3fb950;
+                    border:1px solid #3fb950; border-radius:6px;
+                    padding:5px 14px; font-weight:bold;
+                }
+                QPushButton:hover { background:#1f4a1f; }
+            """)
+            self._auto_timer.start(self.spin_interval.value() * 1000)
+            self._start_scan()
         else:
-            self._auto_btn.configure(text="  Auto OFF", fg=TEXT_MUTED)
-            if self._auto_job:
-                self.after_cancel(self._auto_job)
-                self._auto_job = None
-
-    def _schedule_auto(self):
-        if not self.auto_scan.get():
-            return
-        self._start_scan()
-        interval_ms = max(2, self.scan_interval.get()) * 1000
-        self._auto_job = self.after(interval_ms, self._schedule_auto)
+            self.btn_auto.setText("  Auto Scan")
+            self.btn_auto.setStyleSheet("")
+            self._auto_timer.stop()
 
     def _clear(self):
         self.networks.clear()
         self.history.clear()
-        self.selected_bssid = None
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        self._build_detail_placeholder()
-        self._count_var.set("0 networks")
-        self._status("Cleared.", TEXT_MUTED)
+        self.table.setRowCount(0)
+        self.detail.clear()
+        self.lbl_count.setText("0 networks")
+        self._set_status("Cleared.", "#8b949e")
 
-    # ── Progress animation ─────────────────────────────────────────────────────
-
-    def _animate_progress(self, pos=0):
-        if not self._scanning:
-            return
-        self._progress.delete("all")
-        w = 120
-        seg = 40
-        x1 = (pos % (w + seg)) - seg
-        x2 = x1 + seg
-        x1 = max(0, x1)
-        x2 = min(w, x2)
-        if x2 > x1:
-            self._progress.create_rectangle(x1, 1, x2, 5, fill=ACCENT_BLUE, outline="")
-        self._progress.create_rectangle(0, 0, w, 6,
-                                         outline=BORDER, fill="", width=1)
-        self.after(30, lambda: self._animate_progress(pos + 4))
-
-    def _stop_progress(self):
-        self._progress.delete("all")
-        self._progress.create_rectangle(0, 1, 120, 5, fill=ACCENT_GREEN, outline="")
-
-    # ── Table ──────────────────────────────────────────────────────────────────
-
-    def _visible_networks(self) -> list[dict]:
+    # ── Table ────────────────────────────────────────────────────────────────────
+    def _visible_networks(self) -> list:
         nets = list(self.networks.values())
-        band = self.filter_band.get()
-        enc  = self.filter_enc.get()
-        txt  = self.filter_text.get().lower()
+        band = self.combo_band.currentText()
+        enc  = self.combo_enc.currentText()
+        txt  = self.search_box.text().lower()
         if band != "All":
-            nets = [n for n in nets if n.get("band") == band]
+            nets = [n for n in nets if n["band"] == band]
         if enc != "All":
-            nets = [n for n in nets if n.get("encryption") == enc]
+            nets = [n for n in nets if n["encryption"] == enc]
         if txt:
             nets = [n for n in nets
-                    if txt in n.get("essid", "").lower()
-                    or txt in n.get("bssid", "").lower()
-                    or txt in n.get("vendor", "").lower()]
-        nets.sort(key=lambda n: n.get(self.sort_col, 0) or 0,
-                  reverse=self.sort_reverse)
+                    if txt in n["essid"].lower()
+                    or txt in n["bssid"].lower()
+                    or txt in n["vendor"].lower()]
         return nets
 
     def _refresh_table(self):
-        selected = self.selected_bssid
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
 
         nets = self._visible_networks()
-        self._count_var.set(f"{len(nets)} networks")
+        self.lbl_count.setText(f"{len(nets)} networks")
 
-        for i, n in enumerate(nets):
-            dbm = n["signal_dbm"]
-            qlabel = signal_label(dbm)
-            tag = qlabel.lower()
-            if i % 2 == 1:
-                tag = (tag, "alt")
+        for n in nets:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setRowHeight(row, 36)
 
-            bars = "▂▄▆█"
-            q = n["quality"]
-            if q >= 75:
-                bars_str = "▂▄▆█"
-            elif q >= 50:
-                bars_str = "▂▄▆·"
-            elif q >= 25:
-                bars_str = "▂▄··"
-            else:
-                bars_str = "▂···"
+            dbm   = n["signal_dbm"]
+            color = signal_color(dbm)
 
-            enc_icon = {"Open": "  Open", "WEP": "  WEP",
-                        "WPA": "  WPA", "WPA2": "  WPA2"}.get(n["encryption"], n["encryption"])
+            # Signal column: custom widget with bars + dBm text
+            sig_widget = QWidget()
+            sig_layout = QHBoxLayout(sig_widget)
+            sig_layout.setContentsMargins(8, 2, 4, 2)
+            sig_layout.setSpacing(6)
+            bars = SignalBarsWidget(dbm)
+            sig_layout.addWidget(bars)
+            dbm_lbl = QLabel(f"{dbm} dBm")
+            dbm_lbl.setStyleSheet(f"color:{color.name()}; font-size:11px; font-family:monospace;")
+            sig_layout.addWidget(dbm_lbl)
+            self.table.setCellWidget(row, self._col("signal"), sig_widget)
 
-            values = (
-                f"{bars_str} {dbm} dBm",
-                n["essid"] or "<hidden>",
-                n["bssid"],
-                n["band"],
-                n["channel"],
-                enc_icon,
-                f"{n['quality']}%",
-                n["max_rate_str"],
-                n["vendor"],
-                n["last_seen"],
-            )
-            iid = self.tree.insert("", "end", iid=n["bssid"],
-                                   values=values, tags=tag)
-            if n["bssid"] == selected:
-                self.tree.selection_set(iid)
-                self.tree.focus(iid)
+            # Quality column: progress bar
+            qbar = QProgressBar()
+            qbar.setValue(n["quality"])
+            qbar.setTextVisible(True)
+            qbar.setFormat(f"{n['quality']}%")
+            qbar.setFixedHeight(16)
+            qbar.setStyleSheet(f"""
+                QProgressBar {{
+                    background:#21262d; border-radius:3px; border:none;
+                    color:#e6edf3; font-size:10px; text-align:center;
+                    margin:8px 6px;
+                }}
+                QProgressBar::chunk {{
+                    background:{color.name()}; border-radius:3px;
+                }}
+            """)
+            self.table.setCellWidget(row, self._col("quality"), qbar)
 
-    def _sort_by(self, col):
-        key_map = {
-            "signal":     "signal_dbm",
-            "essid":      "essid",
-            "bssid":      "bssid",
-            "band":       "band",
-            "channel":    "channel",
-            "encryption": "encryption",
-            "quality":    "quality",
-            "rate":       "max_rate",
-            "vendor":     "vendor",
-            "last_seen":  "last_seen",
-        }
-        real = key_map.get(col, col)
-        if self.sort_col == real:
-            self.sort_reverse = not self.sort_reverse
-        else:
-            self.sort_col = real
-            self.sort_reverse = real == "signal_dbm"
-        self._refresh_table()
+            # Text columns
+            text_cols = {
+                "essid":      n["essid"] or "<hidden>",
+                "bssid":      n["bssid"],
+                "band":       n["band"],
+                "channel":    str(n["channel"]),
+                "encryption": n["encryption"],
+                "max_rate":   f"{int(n['max_rate'])} Mbps" if n["max_rate"] else "?",
+                "vendor":     n["vendor"],
+                "last_seen":  n["last_seen"],
+            }
 
-    def _on_select(self, event):
-        sel = self.tree.selection()
+            enc_colors = {
+                "Open": "#f85149", "WEP": "#d29922",
+                "WPA": "#79c0ff", "WPA2": "#3fb950",
+            }
+
+            for key, val in text_cols.items():
+                item = QTableWidgetItem(val)
+                if key == "encryption":
+                    item.setForeground(QColor(enc_colors.get(val, "#e6edf3")))
+                elif key == "essid":
+                    item.setFont(QFont("", 12, QFont.Bold))
+                elif key in ("bssid",):
+                    item.setFont(QFont("Monospace", 10))
+                self.table.setItem(row, self._col(key), item)
+
+            # Sortable numeric value for signal column
+            sig_item = QTableWidgetItem()
+            sig_item.setData(Qt.UserRole, dbm)
+            self.table.setItem(row, self._col("signal"), sig_item)
+            self.table.setCellWidget(row, self._col("signal"), sig_widget)
+
+        self.table.setSortingEnabled(True)
+
+    def _on_select(self):
+        sel = self.table.selectedItems()
         if not sel:
             return
-        bssid = sel[0]
-        self.selected_bssid = bssid
+        row = self.table.row(sel[0])
+        bssid_item = self.table.item(row, self._col("bssid"))
+        if not bssid_item:
+            return
+        bssid = bssid_item.text()
         if bssid in self.networks:
-            self._show_detail(self.networks[bssid])
-
-    # ── Detail panel ───────────────────────────────────────────────────────────
-
-    def _show_detail(self, n: dict):
-        for w in self._detail_frame.winfo_children():
-            w.destroy()
-
-        dbm   = n["signal_dbm"]
-        color = signal_color(dbm)
-
-        # Header bar
-        hdr = tk.Frame(self._detail_frame, bg=color, height=4)
-        hdr.pack(fill="x")
-
-        # SSID big display
-        ssid_fr = tk.Frame(self._detail_frame, bg=BG_PANEL, pady=12)
-        ssid_fr.pack(fill="x", padx=14)
-
-        tk.Label(ssid_fr, text=n["essid"] or "<hidden>",
-                 font=("Segoe UI", 14, "bold"), fg=TEXT_PRIMARY,
-                 bg=BG_PANEL, wraplength=260, justify="left").pack(anchor="w")
-        tk.Label(ssid_fr, text=n["bssid"],
-                 font=("Courier", 10), fg=TEXT_MUTED, bg=BG_PANEL).pack(anchor="w")
-
-        # Signal meter
-        sig_fr = tk.Frame(self._detail_frame, bg=BG_CARD, pady=10)
-        sig_fr.pack(fill="x")
-
-        tk.Label(sig_fr, text="Signal Strength", font=("Segoe UI", 8),
-                 fg=TEXT_MUTED, bg=BG_CARD).pack(anchor="w", padx=14)
-
-        meter_fr = tk.Frame(sig_fr, bg=BG_CARD)
-        meter_fr.pack(fill="x", padx=14, pady=(2, 0))
-
-        tk.Label(meter_fr, text=f"{dbm} dBm",
-                 font=("Courier", 22, "bold"), fg=color, bg=BG_CARD).pack(side="left")
-        tk.Label(meter_fr, text=f"  {signal_label(dbm)}",
-                 font=("Segoe UI", 10), fg=color, bg=BG_CARD).pack(side="left", pady=8)
-
-        # Quality bar
-        q = n["quality"]
-        bar_outer = tk.Frame(self._detail_frame, bg=BG_DARK, height=8)
-        bar_outer.pack(fill="x", padx=14, pady=(4, 8))
-        bar_outer.pack_propagate(False)
-
-        def draw_quality_bar(evt=None):
-            w = bar_outer.winfo_width() or 200
-            filled = int(w * q / 100)
-            for child in bar_outer.winfo_children():
-                child.destroy()
-            tk.Frame(bar_outer, bg=color, width=filled, height=8).place(x=0, y=0)
-            tk.Frame(bar_outer, bg=TEXT_DIM, width=w - filled, height=8).place(x=filled, y=0)
-
-        bar_outer.bind("<Configure>", draw_quality_bar)
-        self.after(50, draw_quality_bar)
-
-        tk.Label(self._detail_frame, text=f"Quality: {q}%",
-                 font=("Segoe UI", 8), fg=TEXT_MUTED,
-                 bg=BG_PANEL).pack(anchor="e", padx=14)
-
-        # Details grid
-        tk.Frame(self._detail_frame, bg=BORDER, height=1).pack(fill="x", pady=6)
-
-        fields = [
-            ("Band",       n["band"]),
-            ("Channel",    n["channel"]),
-            ("Frequency",  n["frequency"]),
-            ("Security",   n["encryption"]),
-            ("Max Rate",   n["max_rate_str"]),
-            ("Mode",       n["mode"]),
-            ("Vendor",     n["vendor"]),
-            ("Last Seen",  n["last_seen"]),
-        ]
-        if n["noise_dbm"] is not None:
-            fields.insert(4, ("Noise", f"{n['noise_dbm']} dBm"))
-
-        grid = tk.Frame(self._detail_frame, bg=BG_PANEL)
-        grid.pack(fill="x", padx=14, pady=4)
-
-        for r, (label, value) in enumerate(fields):
-            tk.Label(grid, text=label, font=("Segoe UI", 8),
-                     fg=TEXT_MUTED, bg=BG_PANEL,
-                     width=10, anchor="w").grid(row=r, column=0, sticky="w", pady=1)
-            tk.Label(grid, text=str(value), font=("Courier", 9),
-                     fg=TEXT_PRIMARY, bg=BG_PANEL,
-                     anchor="w").grid(row=r, column=1, sticky="w", padx=6, pady=1)
-
-        # Signal history sparkline
-        if len(self.history[n["bssid"]]) > 1:
-            tk.Frame(self._detail_frame, bg=BORDER, height=1).pack(fill="x", pady=6)
-            tk.Label(self._detail_frame, text="Signal History",
-                     font=("Segoe UI", 8), fg=TEXT_MUTED,
-                     bg=BG_PANEL).pack(anchor="w", padx=14)
-
-            spark = tk.Canvas(self._detail_frame, bg=BG_CARD,
-                              height=50, highlightthickness=0)
-            spark.pack(fill="x", padx=14, pady=4)
-
-            def draw_spark(evt=None):
-                spark.delete("all")
-                hist = self.history[n["bssid"]]
-                cw = spark.winfo_width() or 260
-                ch = spark.winfo_height() or 50
-                if len(hist) < 2:
-                    return
-                mn, mx = min(hist) - 5, max(hist) + 5
-                rng = mx - mn or 1
-                pts = []
-                for i, v in enumerate(hist):
-                    px = int(i / (len(hist) - 1) * (cw - 4)) + 2
-                    py = int((1 - (v - mn) / rng) * (ch - 4)) + 2
-                    pts.append((px, py))
-                color_s = signal_color(hist[-1])
-                # Draw area fill
-                poly = [2, ch - 2] + [c for p in pts for c in p] + [cw - 2, ch - 2]
-                spark.create_polygon(poly, fill=color_s + "33", outline="")
-                # Draw line
-                for i in range(len(pts) - 1):
-                    spark.create_line(pts[i][0], pts[i][1],
-                                      pts[i+1][0], pts[i+1][1],
-                                      fill=color_s, width=1)
-                # Latest value dot
-                spark.create_oval(pts[-1][0]-3, pts[-1][1]-3,
-                                  pts[-1][0]+3, pts[-1][1]+3,
-                                  fill=color_s, outline="")
-
-            spark.bind("<Configure>", draw_spark)
-            self.after(50, draw_spark)
-
-    # ── Status bar ─────────────────────────────────────────────────────────────
-
-    def _status(self, msg: str, color: str = TEXT_MUTED):
-        self._status_var.set(msg)
-        # Update status label color by finding it
-        for w in self.winfo_children():
-            if isinstance(w, tk.Frame):
-                for child in w.winfo_children():
-                    if isinstance(child, tk.Label) and \
-                       child.cget("textvariable") == str(self._status_var):
-                        child.configure(fg=color)
+            self.detail.show_network(self.networks[bssid], self.history[bssid])
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
-
 def main():
-    app = WiFiAnalyzer()
-    app.mainloop()
+    app = QApplication(sys.argv)
+    app.setApplicationName("ESSIDScan")
+    app.setOrganizationName("immutabletux")
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":

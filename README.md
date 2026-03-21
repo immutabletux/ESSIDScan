@@ -1,8 +1,11 @@
 # ESSIDScan — WiFi Network Analyzer
 
-A desktop GUI application for scanning and monitoring WiFi networks on **Debian/Ubuntu Linux** using `iwlist`.
+A **desktop GUI application** for scanning and monitoring WiFi networks on **Debian/Ubuntu Linux** using `iwlist`.
+
+Built with **PyQt5** — a proper native desktop GUI with real buttons, progress bars, sortable table, and signal history charts.
 
 ![Python 3](https://img.shields.io/badge/Python-3.x-blue)
+![PyQt5](https://img.shields.io/badge/GUI-PyQt5-green)
 ![Platform](https://img.shields.io/badge/Platform-Debian%20%7C%20Ubuntu-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
@@ -31,7 +34,7 @@ A desktop GUI application for scanning and monitoring WiFi networks on **Debian/
 
 - Debian / Ubuntu Linux
 - Python 3
-- `python3-tk`
+- `python3-pyqt5`
 - `wireless-tools` (`iwlist`)
 
 ## Install Dependencies
@@ -44,7 +47,7 @@ chmod +x install_deps.sh
 Or manually:
 
 ```bash
-sudo apt-get install -y wireless-tools python3-tk python3
+sudo apt-get install -y wireless-tools python3 python3-pyqt5
 ```
 
 ## Run
