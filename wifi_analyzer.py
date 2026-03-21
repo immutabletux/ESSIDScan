@@ -8,7 +8,6 @@ Run with: sudo python3 wifi_analyzer.py
 import sys
 import os
 import re
-import random
 import subprocess
 from datetime import datetime
 from collections import defaultdict
@@ -59,70 +58,6 @@ def signal_color(dbm: int) -> QColor:
     if dbm >= -65: return QColor("#79c0ff")
     if dbm >= -75: return QColor("#d29922")
     return QColor("#f85149")
-
-
-# ── VM / VirtualBox detection ──────────────────────────────────────────────────
-def is_virtual_machine() -> bool:
-    """Return True when running inside a VM (VirtualBox, VMware, QEMU, etc.)."""
-    dmi_paths = [
-        "/sys/class/dmi/id/product_name",
-        "/sys/class/dmi/id/sys_vendor",
-        "/sys/class/dmi/id/board_vendor",
-    ]
-    vm_strings = {"virtualbox", "vmware", "qemu", "kvm", "xen", "hyper-v", "bochs", "innotek"}
-    for path in dmi_paths:
-        try:
-            with open(path) as f:
-                val = f.read().strip().lower()
-                if any(v in val for v in vm_strings):
-                    return True
-        except Exception:
-            pass
-    # Check systemd-detect-virt
-    try:
-        r = subprocess.run(["systemd-detect-virt", "--vm"], capture_output=True, text=True, timeout=3)
-        if r.returncode == 0 and r.stdout.strip() not in ("none", ""):
-            return True
-    except Exception:
-        pass
-    return False
-
-
-# ── Demo / simulation data ──────────────────────────────────────────────────────
-_DEMO_NETS = [
-    {"essid": "HomeNetwork_5G",   "bssid": "A4:2B:B0:11:22:33", "channel": 36, "frequency": "5.180 GHz", "encryption": "WPA2", "max_rate": 867.0,  "base_dbm": -48},
-    {"essid": "HomeNetwork_2G",   "bssid": "A4:2B:B0:11:22:34", "channel":  6, "frequency": "2.437 GHz", "encryption": "WPA2", "max_rate": 300.0,  "base_dbm": -52},
-    {"essid": "CoffeeShop_WiFi",  "bssid": "8C:59:C3:AA:BB:CC", "channel": 11, "frequency": "2.462 GHz", "encryption": "WPA2", "max_rate": 130.0,  "base_dbm": -67},
-    {"essid": "DIRECT-Samsung-TV","bssid": "FC:EC:DA:33:44:55", "channel":  1, "frequency": "2.412 GHz", "encryption": "WPA2", "max_rate": 54.0,   "base_dbm": -71},
-    {"essid": "Neighbor_Net",     "bssid": "EC:08:6B:66:77:88", "channel": 40, "frequency": "5.200 GHz", "encryption": "WPA",  "max_rate": 300.0,  "base_dbm": -74},
-    {"essid": "",                 "bssid": "20:E5:2A:99:AA:BB", "channel":  6, "frequency": "2.437 GHz", "encryption": "WPA2", "max_rate": 54.0,   "base_dbm": -79},
-    {"essid": "OldRouter",        "bssid": "00:23:14:CC:DD:EE", "channel":  6, "frequency": "2.437 GHz", "encryption": "WEP",  "max_rate": 54.0,   "base_dbm": -82},
-    {"essid": "GuestNetwork",     "bssid": "28:80:88:FF:00:11", "channel": 11, "frequency": "2.462 GHz", "encryption": "Open", "max_rate": 130.0,  "base_dbm": -85},
-]
-
-def demo_scan() -> list:
-    """Return simulated network list with slightly randomised signal levels."""
-    now = datetime.now().strftime("%H:%M:%S")
-    nets = []
-    for template in _DEMO_NETS:
-        dbm = template["base_dbm"] + random.randint(-4, 4)
-        freq = template["frequency"]
-        band = "5 GHz" if freq.startswith("5") else "2.4 GHz"
-        nets.append({
-            "essid":      template["essid"],
-            "bssid":      template["bssid"],
-            "channel":    template["channel"],
-            "frequency":  freq + " GHz" if not freq.endswith("GHz") else freq,
-            "signal_dbm": dbm,
-            "noise_dbm":  None,
-            "quality":    dbm_to_quality(dbm),
-            "encryption": template["encryption"],
-            "max_rate":   template["max_rate"],
-            "band":       band,
-            "vendor":     oui_vendor(template["bssid"]),
-            "last_seen":  now,
-        })
-    return nets
 
 
 # ── Interface detection ────────────────────────────────────────────────────────
@@ -376,17 +311,6 @@ class ScanWorker(QThread):
         self.finished.emit(nets)
 
 
-# ── Demo scan worker ───────────────────────────────────────────────────────────
-class DemoScanWorker(QThread):
-    finished = pyqtSignal(list)
-    error    = pyqtSignal(str)
-
-    def run(self):
-        import time
-        time.sleep(0.8)          # simulate scan delay
-        self.finished.emit(demo_scan())
-
-
 # ── Detail panel ───────────────────────────────────────────────────────────────
 class DetailPanel(QWidget):
     def __init__(self, parent=None):
@@ -586,7 +510,6 @@ class MainWindow(QMainWindow):
         self._auto_timer.timeout.connect(self._start_scan)
 
         self._no_iface_warning = False
-        self._demo_mode = False
         self._apply_stylesheet()
         self._build_ui()
         self._check_root()
@@ -628,18 +551,6 @@ class MainWindow(QMainWindow):
         }
         QPushButton#btn_scan:hover  { background: #388bfd; }
         QPushButton#btn_scan:pressed { background: #1158c7; }
-        QPushButton#btn_demo {
-            background: #161b22;
-            color: #8b949e;
-            border: 1px solid #30363d;
-            font-weight: bold;
-        }
-        QPushButton#btn_demo:hover   { background: #21262d; color: #79c0ff; border-color: #79c0ff; }
-        QPushButton#btn_demo:checked {
-            background: #0d2340;
-            color: #79c0ff;
-            border: 1px solid #79c0ff;
-        }
         QPushButton#btn_auto_on {
             background: #1a3a1a;
             color: #3fb950;
@@ -766,25 +677,13 @@ class MainWindow(QMainWindow):
         tb.addWidget(QLabel("  Interface:"))
         self.iface_combo = QComboBox()
         ifaces = get_interfaces()
-        self._is_vm = is_virtual_machine()
         if ifaces:
             self.iface_combo.addItems(ifaces)
         else:
-            self.iface_combo.addItem("demo")
+            self.iface_combo.addItem("(none)")
             self._no_iface_warning = True
-            self._demo_mode = True
         self.iface_combo.setFixedWidth(120)
         tb.addWidget(self.iface_combo)
-
-        # Demo mode toggle button (visible always, active when no real iface)
-        self.btn_demo = QPushButton("  Demo OFF")
-        self.btn_demo.setObjectName("btn_demo")
-        self.btn_demo.setFixedHeight(30)
-        self.btn_demo.setCheckable(True)
-        self.btn_demo.setChecked(self._demo_mode)
-        self.btn_demo.setText("  Demo ON" if self._demo_mode else "  Demo OFF")
-        self.btn_demo.toggled.connect(self._toggle_demo)
-        tb.addWidget(self.btn_demo)
 
         tb.addSeparator()
 
@@ -946,19 +845,13 @@ class MainWindow(QMainWindow):
         return next(i for i, (k, _, _) in enumerate(self.COLUMNS) if k == key)
 
     def _check_root(self):
-        if self._demo_mode:
-            vm_note = " (VirtualBox detected — USB WiFi passthrough required for live scan)" if self._is_vm else ""
-            self._set_status(
-                f"DEMO MODE — simulated networks{vm_note}",
-                "#79c0ff"
-            )
-            return
         if self._no_iface_warning:
             self._set_status(
-                "No wireless interfaces found. "
-                "Ensure your WiFi adapter is connected and drivers are loaded.",
+                "No wireless adapter found. Connect a WiFi adapter to begin scanning.",
                 "#f85149"
             )
+            self.btn_scan.setEnabled(False)
+            self.btn_auto.setEnabled(False)
             return
         if hasattr(os, "geteuid") and os.geteuid() != 0:
             self._set_status(
@@ -971,47 +864,14 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet(f"color:{color};")
 
     # ── Scanning ────────────────────────────────────────────────────────────────
-    def _toggle_demo(self, checked: bool):
-        self._demo_mode = checked
-        self.btn_demo.setText("  Demo ON" if checked else "  Demo OFF")
-        if checked:
-            if not self.iface_combo.findText("demo") >= 0:
-                self.iface_combo.insertItem(0, "demo")
-            self.iface_combo.setCurrentText("demo")
-            self._set_status("DEMO MODE — simulated networks", "#79c0ff")
-        else:
-            # Re-populate real interfaces
-            ifaces = get_interfaces()
-            self.iface_combo.clear()
-            if ifaces:
-                self.iface_combo.addItems(ifaces)
-                self._no_iface_warning = False
-                self._check_root()
-            else:
-                self.iface_combo.addItem("demo")
-                self._demo_mode = True
-                self.btn_demo.setChecked(True)
-                self._set_status("No real interfaces found — staying in Demo mode.", "#f85149")
-
     def _start_scan(self):
         if self._worker and self._worker.isRunning():
             return
         iface = self.iface_combo.currentText()
-        if self._demo_mode or iface == "demo":
-            self.btn_scan.setEnabled(False)
-            self.btn_scan.setText("  Scanning…")
-            self.progress_bar.setVisible(True)
-            self._set_status("Demo scan running…", "#79c0ff")
-            self._worker = DemoScanWorker()
-            self._worker.finished.connect(self._scan_done)
-            self._worker.error.connect(self._scan_error)
-            self._worker.start()
-            return
-        if not iface:
+        if not iface or iface == "(none)":
             QMessageBox.warning(
-                self, "No Interface",
-                "No wireless interface found.\n\n"
-                "Enable Demo Mode or connect a WiFi adapter."
+                self, "No Wireless Adapter",
+                "No wireless adapter found.\n\nConnect a WiFi adapter and restart ESSIDscan."
             )
             return
         self.btn_scan.setEnabled(False)
@@ -1038,10 +898,9 @@ class MainWindow(QMainWindow):
 
         self._refresh_table()
         visible = self._visible_networks()
-        demo_tag = "  [DEMO]" if self._demo_mode else ""
         self._set_status(
-            f"Scan complete{demo_tag} — {len(nets)} networks found  |  {len(self.networks)} total tracked",
-            "#79c0ff" if self._demo_mode else "#3fb950"
+            f"Scan complete — {len(nets)} networks found  |  {len(self.networks)} total tracked",
+            "#3fb950"
         )
         self.lbl_count.setText(f"{len(visible)} networks")
 
