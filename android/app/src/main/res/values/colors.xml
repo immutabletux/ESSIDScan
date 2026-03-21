@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark theme palette matching the desktop app -->
+    <color name="bg_dark">#0d1117</color>
+    <color name="bg_surface">#161b22</color>
+    <color name="bg_card">#1c2128</color>
+    <color name="divider">#30363d</color>
+
+    <color name="text_primary">#e6edf3</color>
+    <color name="text_secondary">#8b949e</color>
+    <color name="text_hint">#484f58</color>
+
+    <color name="accent_blue">#79c0ff</color>
+    <color name="accent_green">#3fb950</color>
+    <color name="accent_amber">#d29922</color>
+    <color name="accent_red">#f85149</color>
+
+    <!-- Required by Material theme -->
+    <color name="purple_200">#79c0ff</color>
+    <color name="purple_500">#79c0ff</color>
+    <color name="purple_700">#58a6ff</color>
+    <color name="teal_200">#3fb950</color>
+    <color name="teal_700">#2ea043</color>
+    <color name="black">#000000</color>
+    <color name="white">#ffffff</color>
+</resources>
