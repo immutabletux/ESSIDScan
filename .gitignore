@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.spec
+screenshot_preview.html
+.claude/
