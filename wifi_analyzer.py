@@ -72,7 +72,7 @@ def get_interfaces_windows() -> list:
             capture_output=True, text=True, timeout=8,
             creationflags=0x08000000,  # CREATE_NO_WINDOW
         )
-        return re.findall(r'^\s+Name\s+:\s+(.+)$', r.stdout, re.MULTILINE)
+        return [n.strip() for n in re.findall(r'^\s+Name\s+:\s+(.+)$', r.stdout, re.MULTILINE)]
     except Exception:
         return []
 
@@ -396,7 +396,8 @@ class ScanWorker(QThread):
         try:
             r = subprocess.run(
                 ["netsh", "wlan", "show", "networks",
-                 f"interface={self.iface}", "mode=bssid"],
+                 f"interface={self.iface}",
+                 "mode=bssid"],
                 capture_output=True, text=True, timeout=20,
                 creationflags=0x08000000,  # CREATE_NO_WINDOW
             )
@@ -841,7 +842,8 @@ class MainWindow(QMainWindow):
         else:
             self.iface_combo.addItem("(none)")
             self._no_iface_warning = True
-        self.iface_combo.setFixedWidth(120)
+        self.iface_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.iface_combo.setMinimumWidth(120)
         tb.addWidget(self.iface_combo)
 
         tb.addSeparator()
