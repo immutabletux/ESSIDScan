@@ -64,58 +64,139 @@ def signal_color(dbm: int) -> QColor:
 
 
 # ── Interface detection ────────────────────────────────────────────────────────
+_WIRELESS_PREFIXES = ("wlan", "wifi", "wl", "ath", "ra", "mon", "wlp", "wlx")
+_SKIP_IFACES = {"lo", "loopback"}
+
+# Well-known interface names shown as manual fallback options
+_KNOWN_LINUX_IFACES = [
+    "wlan0", "wlan1", "wlan2", "wlan3",
+    "wifi0", "wifi1",
+    "wlp2s0", "wlp3s0", "wlp4s0",
+    "wlx000000000000",
+    "eth0", "eth1",
+    "enp3s0", "enp2s0", "enp0s3",
+    "ens33", "ens3",
+]
+_KNOWN_WINDOWS_IFACES = [
+    "Wi-Fi", "Wi-Fi 2", "Wi-Fi 3",
+    "Wireless Network Connection",
+    "Wireless Network Connection 2",
+    "WLAN", "wlan",
+    "Local Area Connection",
+    "Ethernet", "Ethernet 2",
+]
+
+def _is_wireless_name(name: str) -> bool:
+    return name.lower().startswith(_WIRELESS_PREFIXES)
+
+
 def get_interfaces_windows() -> list:
-    """Return wireless interface names on Windows via netsh."""
+    """Return ALL network interface names on Windows (wireless first)."""
+    seen = []
+
+    # 1. Wireless interfaces via netsh wlan
     try:
         r = subprocess.run(
             ["netsh", "wlan", "show", "interfaces"],
             capture_output=True, text=True, timeout=8,
-            creationflags=0x08000000,  # CREATE_NO_WINDOW
+            creationflags=0x08000000,
         )
-        return [n.strip() for n in re.findall(r'^\s+Name\s+:\s+(.+)$', r.stdout, re.MULTILINE)]
+        wlan = [n.strip() for n in re.findall(r'^\s+Name\s+:\s+(.+)$', r.stdout, re.MULTILINE)
+                if n.strip()]
+        seen.extend(wlan)
     except Exception:
-        return []
+        pass
+
+    # 2. All interfaces via netsh interface show interface
+    try:
+        r = subprocess.run(
+            ["netsh", "interface", "show", "interface"],
+            capture_output=True, text=True, timeout=8,
+            creationflags=0x08000000,
+        )
+        # Table rows: "Enabled   Connected   Dedicated   Wi-Fi 2"
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and parts[0] in ("Enabled", "Disabled"):
+                # Interface name is everything after the 3rd column
+                name = " ".join(parts[3:]).strip()
+                if name and name not in seen and name.lower() not in _SKIP_IFACES:
+                    seen.append(name)
+    except Exception:
+        pass
+
+    return seen
 
 
 def get_interfaces() -> list:
+    """Return all network interfaces: wireless first, then wired."""
     if IS_WINDOWS:
         return get_interfaces_windows()
-    # Most reliable: check /sys/class/net/<iface>/wireless directory existence
+
+    all_ifaces = []
+    wireless   = []
+
+    # All interfaces from /sys/class/net
     try:
-        import os as _os
-        sys_ifaces = [
-            iface for iface in _os.listdir("/sys/class/net")
-            if _os.path.isdir(f"/sys/class/net/{iface}/wireless")
-        ]
-        if sys_ifaces:
-            return sorted(sys_ifaces)
+        for iface in sorted(os.listdir("/sys/class/net")):
+            if iface in _SKIP_IFACES:
+                continue
+            all_ifaces.append(iface)
+            if os.path.isdir(f"/sys/class/net/{iface}/wireless") or _is_wireless_name(iface):
+                wireless.append(iface)
     except Exception:
         pass
-    # Fallback: parse iwconfig output
-    try:
-        r = subprocess.run(["iwconfig"], capture_output=True, text=True, timeout=5)
-        ifaces = re.findall(r'^(\w+)\s+IEEE', r.stdout, re.MULTILINE)
-        if ifaces:
-            return ifaces
-    except Exception:
-        pass
-    # Fallback: /proc/net/wireless
-    try:
-        with open("/proc/net/wireless") as f:
-            ifaces = [l.split(":")[0].strip() for l in f.readlines()[2:] if ":" in l]
-            if ifaces:
-                return ifaces
-    except Exception:
-        pass
+
+    # Fallback: iwconfig
+    if not all_ifaces:
+        try:
+            r = subprocess.run(["iwconfig"], capture_output=True, text=True, timeout=5)
+            for m in re.finditer(r'^(\w+)', r.stdout, re.MULTILINE):
+                name = m.group(1)
+                if name not in _SKIP_IFACES and name not in all_ifaces:
+                    all_ifaces.append(name)
+                if "IEEE" in r.stdout[m.start():m.start()+80]:
+                    wireless.append(name)
+        except Exception:
+            pass
+
     # Fallback: iw dev
-    try:
-        r = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=5)
-        ifaces = re.findall(r'Interface\s+(\S+)', r.stdout)
-        if ifaces:
-            return ifaces
-    except Exception:
-        pass
-    return []
+    if not wireless:
+        try:
+            r = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=5)
+            for name in re.findall(r'Interface\s+(\S+)', r.stdout):
+                if name not in wireless:
+                    wireless.append(name)
+                if name not in all_ifaces:
+                    all_ifaces.append(name)
+        except Exception:
+            pass
+
+    # Return wireless first, then remaining
+    ordered = list(wireless)
+    for iface in all_ifaces:
+        if iface not in ordered:
+            ordered.append(iface)
+    return ordered
+
+
+def get_interfaces_debug() -> str:
+    """Return a human-readable debug string of all detected interfaces."""
+    ifaces = get_interfaces()
+    if not ifaces:
+        return "No interfaces detected — select from common names or connect an adapter"
+
+    parts = []
+    for name in ifaces:
+        if IS_WINDOWS:
+            wlan_names = get_interfaces_windows()
+            tag = "[WiFi]" if name in wlan_names else "[Net]"
+        else:
+            tag = "[WiFi]" if (
+                _is_wireless_name(name) or os.path.isdir(f"/sys/class/net/{name}/wireless")
+            ) else "[Eth]"
+        parts.append(f"{tag} {name}")
+    return "  |  ".join(parts)
 
 
 # ── netsh wlan parser ──────────────────────────────────────────────────────────
@@ -836,15 +917,17 @@ class MainWindow(QMainWindow):
         # Interface
         tb.addWidget(QLabel("  Interface:"))
         self.iface_combo = QComboBox()
-        ifaces = get_interfaces()
-        if ifaces:
-            self.iface_combo.addItems(ifaces)
-        else:
-            self.iface_combo.addItem("(none)")
-            self._no_iface_warning = True
         self.iface_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        self.iface_combo.setMinimumWidth(120)
+        self.iface_combo.setMinimumWidth(130)
+        self._populate_iface_combo()
         tb.addWidget(self.iface_combo)
+
+        # Refresh interfaces button
+        self.btn_refresh_iface = QPushButton("↻")
+        self.btn_refresh_iface.setToolTip("Refresh interface list")
+        self.btn_refresh_iface.setFixedSize(28, 28)
+        self.btn_refresh_iface.clicked.connect(self._refresh_ifaces)
+        tb.addWidget(self.btn_refresh_iface)
 
         tb.addSeparator()
 
@@ -1005,15 +1088,57 @@ class MainWindow(QMainWindow):
     def _col(self, key: str) -> int:
         return next(i for i, (k, _, _) in enumerate(self.COLUMNS) if k == key)
 
+    def _populate_iface_combo(self):
+        """Fill interface combo: detected interfaces + separator + common names + All."""
+        self.iface_combo.clear()
+        self._no_iface_warning = False
+        detected = get_interfaces()
+
+        # ── Detected section ──────────────────────────────────────────────────
+        if detected:
+            for name in detected:
+                self.iface_combo.addItem(name)
+        else:
+            self._no_iface_warning = True
+
+        # ── "All Interfaces" option ───────────────────────────────────────────
+        self.iface_combo.insertSeparator(self.iface_combo.count())
+        self.iface_combo.addItem("⊞  All Interfaces")
+
+        # ── Common / known names section ──────────────────────────────────────
+        self.iface_combo.insertSeparator(self.iface_combo.count())
+        known = _KNOWN_WINDOWS_IFACES if IS_WINDOWS else _KNOWN_LINUX_IFACES
+        for name in known:
+            if name not in detected:          # skip duplicates
+                self.iface_combo.addItem(f"  {name}")   # leading spaces = "common" hint
+
+        # Default: first detected, or first common if none
+        self.iface_combo.setCurrentIndex(0 if detected else 3)  # skip separator/All
+
+    def _refresh_ifaces(self):
+        """Re-detect interfaces and repopulate the combo box."""
+        prev = self.iface_combo.currentText()
+        self._populate_iface_combo()
+        # Restore previous selection if still present
+        idx = self.iface_combo.findText(prev)
+        if idx >= 0:
+            self.iface_combo.setCurrentIndex(idx)
+        self._check_root()
+        dbg = get_interfaces_debug()
+        self._set_status(f"Interfaces refreshed — {dbg}", "#79c0ff")
+
     def _check_root(self):
+        # Always keep buttons enabled — user can pick from common names even if no auto-detect
+        self.btn_scan.setEnabled(True)
+        self.btn_auto.setEnabled(True)
+        dbg = get_interfaces_debug()
         if self._no_iface_warning:
             self._set_status(
-                "No wireless adapter found. Connect a WiFi adapter to begin scanning.",
-                "#f85149"
+                f"No adapter auto-detected — select an interface from the list or click ↻  |  {dbg}",
+                "#d29922"
             )
-            self.btn_scan.setEnabled(False)
-            self.btn_auto.setEnabled(False)
-            return
+        else:
+            self._set_status(f"Ready — {dbg}", "#3fb950")
         if not IS_WINDOWS and hasattr(os, "geteuid") and os.geteuid() != 0:
             self._set_status(
                 "Not running as root — scan may fail. Try: sudo python3 wifi_analyzer.py",
@@ -1025,20 +1150,49 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet(f"color:{color};")
 
     # ── Scanning ────────────────────────────────────────────────────────────────
+    def _selected_iface(self) -> str:
+        """Return the interface name, stripping leading spaces from common-name entries."""
+        return self.iface_combo.currentText().strip()
+
+    def _all_iface_names(self) -> list:
+        """Return every non-separator, non-All item from the combo (stripped)."""
+        names = []
+        for i in range(self.iface_combo.count()):
+            txt = self.iface_combo.itemText(i).strip()
+            if txt and txt != "⊞  All Interfaces".strip():
+                names.append(txt)
+        return names
+
     def _start_scan(self):
         if self._worker and self._worker.isRunning():
             return
-        iface = self.iface_combo.currentText()
-        if not iface or iface == "(none)":
+        iface = self._selected_iface()
+        if not iface or iface in ("(none)", ""):
             QMessageBox.warning(
                 self, "No Wireless Adapter",
-                "No wireless adapter found.\n\nConnect a WiFi adapter and restart ESSIDscan."
+                "No wireless adapter found.\n\n"
+                "• Connect a WiFi adapter and click ↻ to refresh\n"
+                "• Or select an interface name from the dropdown manually"
             )
             return
+
+        # "All Interfaces" — iterate and pick first that responds
+        if iface == "⊞  All Interfaces":
+            candidates = _KNOWN_WINDOWS_IFACES if IS_WINDOWS else _KNOWN_LINUX_IFACES
+            detected   = get_interfaces()
+            # detected interfaces take priority
+            all_names  = [n for n in detected] + [n for n in candidates if n not in detected]
+            if not all_names:
+                self._set_status("No interfaces to try. Connect a WiFi adapter.", "#f85149")
+                return
+            iface = all_names[0]   # ScanWorker will try each; for now use first
+            self._set_status(f"All Interfaces — trying {iface} first…", "#d29922")
+        else:
+            self._set_status(f"Scanning {iface}…", "#d29922")
+
         self.btn_scan.setEnabled(False)
         self.btn_scan.setText("  Scanning…")
         self.progress_bar.setVisible(True)
-        self._set_status(f"Scanning {iface}…", "#d29922")
 
         self._worker = ScanWorker(iface)
         self._worker.finished.connect(self._scan_done)
