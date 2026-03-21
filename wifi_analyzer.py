@@ -232,33 +232,36 @@ def parse_netsh(output: str) -> list:
     networks = []
     now = datetime.now().strftime("%H:%M:%S")
 
+    # Normalise line endings (netsh sometimes emits \r\n)
+    output = output.replace('\r\n', '\n').replace('\r', '\n')
+
     # Split into per-SSID blocks
     ssid_blocks = re.split(r'(?=^SSID \d+ :)', output, flags=re.MULTILINE)
 
     for block in ssid_blocks:
-        if not block.strip() or not block.startswith("SSID"):
+        if not block.strip() or not block.lstrip().startswith("SSID"):
             continue
 
-        m = re.match(r'SSID \d+ : (.*)', block)
+        m = re.search(r'^SSID \d+ : ?(.*)', block, re.MULTILINE)
         essid = m.group(1).strip() if m else ""
 
-        auth_m = re.search(r'Authentication\s+:\s+(.+)', block)
+        auth_m = re.search(r'Authentication\s*:\s*(.+)', block)
         auth_str = auth_m.group(1).strip() if auth_m else "Unknown"
         encryption = _netsh_auth_to_enc(auth_str)
 
         # Each BSSID sub-block
-        bssid_blocks = re.split(r'(?=^\s+BSSID \d+\s+:)', block, flags=re.MULTILINE)
+        bssid_blocks = re.split(r'(?=\bBSSID \d+\s*:)', block, flags=re.MULTILINE)
         for bb in bssid_blocks:
-            bm = re.search(r'BSSID \d+\s+:\s+([0-9a-fA-F:]{17})', bb)
+            bm = re.search(r'BSSID \d+\s*:\s*([0-9a-fA-F:]{17})', bb)
             if not bm:
                 continue
             bssid = bm.group(1).upper()
 
-            sig_m = re.search(r'Signal\s+:\s+(\d+)%', bb)
+            sig_m = re.search(r'Signal\s*:\s*(\d+)\s*%', bb)
             quality = int(sig_m.group(1)) if sig_m else 0
             signal_dbm = quality // 2 - 100   # approximate conversion
 
-            ch_m = re.search(r'Channel\s+:\s+(\d+)', bb)
+            ch_m = re.search(r'Channel\s*:\s*(\d+)', bb)
             channel = int(ch_m.group(1)) if ch_m else 0
 
             freq = _channel_to_freq(channel) if channel else "?"
@@ -480,16 +483,34 @@ class ScanWorker(QThread):
         else:
             self._run_linux()
 
+    def _netsh_scan(self, iface: str = None) -> str:
+        """Run netsh wlan show networks mode=bssid, optionally for a specific interface."""
+        cmd = ["netsh", "wlan", "show", "networks", "mode=bssid"]
+        if iface:
+            # Pass interface name as a separate value so spaces are handled correctly
+            cmd += [f"interface={iface}"]
+        r = subprocess.run(
+            cmd,
+            capture_output=True, timeout=20,
+            creationflags=0x08000000,
+        )
+        # Decode with UTF-8 first, fall back to the system default (CP1252 etc.)
+        try:
+            return r.stdout.decode("utf-8", errors="replace")
+        except Exception:
+            return r.stdout.decode(errors="replace")
+
     def _run_windows(self):
         try:
-            r = subprocess.run(
-                ["netsh", "wlan", "show", "networks",
-                 f"interface={self.iface}",
-                 "mode=bssid"],
-                capture_output=True, text=True, timeout=20,
-                creationflags=0x08000000,  # CREATE_NO_WINDOW
-            )
-            out = r.stdout
+            # 1. Scan without specifying interface — catches all wireless adapters
+            out = self._netsh_scan()
+
+            # If no results or interface error, retry with explicit interface name
+            if (not out.strip()
+                    or "There is no wireless interface" in out
+                    or "No networks found" in out):
+                out = self._netsh_scan(self.iface)
+
         except subprocess.TimeoutExpired:
             self.error.emit("Scan timed out.")
             return
@@ -503,7 +524,7 @@ class ScanWorker(QThread):
         if "There is no wireless interface" in out or "is not running" in out:
             self.error.emit(
                 f"Interface '{self.iface}' is not available.\n\n"
-                "Ensure your WiFi adapter is enabled in Windows."
+                "Ensure your WiFi adapter is enabled and WLAN AutoConfig is running."
             )
             return
         if "AutoConfig is not enabled" in out:
@@ -514,18 +535,26 @@ class ScanWorker(QThread):
             return
 
         nets = parse_netsh(out)
-        if not nets and r.returncode != 0:
-            self.error.emit(f"netsh returned no results.\n\nOutput:\n{out[:300]}")
+        if not nets:
+            self.error.emit(
+                f"No networks found.\n\n"
+                f"Interface: {self.iface}\n"
+                f"netsh output:\n{out[:400]}"
+            )
             return
         self.finished.emit(nets)
 
+    def _iwlist_scan(self, iface: str):
+        """Run iwlist <iface> scan, return (stdout+stderr, returncode)."""
+        r = subprocess.run(
+            ["iwlist", iface, "scan"],
+            capture_output=True, text=True, timeout=20,
+        )
+        return r.stdout + r.stderr, r.returncode
+
     def _run_linux(self):
         try:
-            r = subprocess.run(
-                ["iwlist", self.iface, "scan"],
-                capture_output=True, text=True, timeout=20,
-            )
-            out = r.stdout + r.stderr
+            out, rc = self._iwlist_scan(self.iface)
         except subprocess.TimeoutExpired:
             self.error.emit("Scan timed out.")
             return
@@ -536,15 +565,28 @@ class ScanWorker(QThread):
             self.error.emit(str(ex))
             return
 
-        if "Interface doesn't support scanning" in out:
-            self.error.emit(f"{self.iface} does not support scanning.")
-            return
-        if "No such device" in out:
+        if "Interface doesn't support scanning" in out or "No such device" in out:
+            # Try every other wireless interface before giving up
+            fallback_ifaces = [
+                i for i in get_interfaces()
+                if i != self.iface and _is_wireless_name(i)
+            ]
+            for fb in fallback_ifaces:
+                try:
+                    fb_out, fb_rc = self._iwlist_scan(fb)
+                    nets = parse_iwlist(fb_out)
+                    if nets:
+                        self.finished.emit(nets)
+                        return
+                except Exception:
+                    continue
             self.error.emit(
-                f"Interface '{self.iface}' not found.\n\n"
-                "Select a valid wireless interface from the dropdown."
+                f"'{self.iface}' does not support scanning.\n\n"
+                f"Try: {', '.join(fallback_ifaces) or 'no wireless interfaces found'}.\n"
+                f"Also try: sudo ip link set <iface> up"
             )
             return
+
         if "Network is down" in out:
             self.error.emit(
                 f"Interface '{self.iface}' is down.\n\n"
@@ -553,9 +595,27 @@ class ScanWorker(QThread):
             return
 
         nets = parse_iwlist(out)
-        if not nets and r.returncode != 0:
-            self.error.emit(f"iwlist returned no results.\n\nRaw output:\n{out[:300]}")
+        # If zero results, try the other wireless interfaces
+        if not nets:
+            fallback_ifaces = [
+                i for i in get_interfaces()
+                if i != self.iface and _is_wireless_name(i)
+            ]
+            for fb in fallback_ifaces:
+                try:
+                    fb_out, _ = self._iwlist_scan(fb)
+                    nets = parse_iwlist(fb_out)
+                    if nets:
+                        self.finished.emit(nets)
+                        return
+                except Exception:
+                    continue
+            self.error.emit(
+                f"No networks found on '{self.iface}'.\n\n"
+                f"Raw output:\n{out[:400]}"
+            )
             return
+
         self.finished.emit(nets)
 
 
