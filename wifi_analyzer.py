@@ -9,23 +9,21 @@ import sys
 import os
 import re
 import subprocess
-import threading
 from datetime import datetime
 from collections import defaultdict
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QComboBox, QLineEdit, QSpinBox, QCheckBox,
+    QPushButton, QLabel, QComboBox, QLineEdit, QSpinBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter,
-    QFrame, QProgressBar, QGroupBox, QScrollArea, QSizePolicy,
-    QAbstractItemView, QToolBar, QAction, QStatusBar, QMessageBox,
+    QFrame, QProgressBar, QScrollArea, QSizePolicy,
+    QAbstractItemView, QToolBar, QStatusBar, QMessageBox,
 )
 from PyQt5.QtCore import (
     Qt, QTimer, QThread, pyqtSignal, QSize, QRect, QPoint,
 )
 from PyQt5.QtGui import (
-    QColor, QPainter, QPen, QBrush, QFont, QFontDatabase,
-    QLinearGradient, QPalette, QIcon, QPixmap,
+    QColor, QPainter, QPen, QBrush, QFont, QPolygon,
 )
 
 
@@ -129,6 +127,17 @@ def parse_iwlist(output: str) -> list:
     return networks
 
 
+# ── Sortable numeric table item ────────────────────────────────────────────────
+class NumericItem(QTableWidgetItem):
+    """QTableWidgetItem that sorts by a numeric UserRole value."""
+    def __lt__(self, other):
+        self_val  = self.data(Qt.UserRole)
+        other_val = other.data(Qt.UserRole)
+        if self_val is None or other_val is None:
+            return super().__lt__(other)
+        return self_val < other_val
+
+
 # ── Signal bar widget ──────────────────────────────────────────────────────────
 class SignalBarsWidget(QWidget):
     def __init__(self, dbm: int = -100, parent=None):
@@ -166,6 +175,10 @@ class SparklineWidget(QWidget):
         self.setMinimumHeight(60)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
+    def sizeHint(self):
+        from PyQt5.QtCore import QSize
+        return QSize(self.minimumWidth(), 60)
+
     def set_history(self, history: list):
         self.history = list(history)
         self.update()
@@ -200,7 +213,6 @@ class SparklineWidget(QWidget):
         fill = QColor(base_color)
         fill.setAlpha(40)
 
-        from PyQt5.QtGui import QPolygon
         poly_pts = [QPoint(pts[0].x(), h)] + pts + [QPoint(pts[-1].x(), h)]
         poly = QPolygon(poly_pts)
         p.setBrush(QBrush(fill))
@@ -295,14 +307,7 @@ class DetailPanel(QWidget):
         self.layout_inner.addWidget(self.placeholder)
         self.layout_inner.addStretch()
 
-        self._content_widgets = []
-
     def clear(self):
-        for w in self._content_widgets:
-            self.layout_inner.removeWidget(w)
-            w.deleteLater()
-        self._content_widgets = []
-        # remove stretch
         while self.layout_inner.count():
             item = self.layout_inner.takeAt(0)
             if item.widget():
@@ -431,8 +436,8 @@ class DetailPanel(QWidget):
 
     def _divider(self) -> QFrame:
         line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("color:#30363d;")
+        line.setFixedHeight(1)
+        line.setStyleSheet("background-color:#30363d;")
         return line
 
 
@@ -655,6 +660,7 @@ class MainWindow(QMainWindow):
         self.spin_interval.setValue(10)
         self.spin_interval.setSuffix(" s")
         self.spin_interval.setFixedWidth(70)
+        self.spin_interval.valueChanged.connect(self._update_auto_interval)
         tb.addWidget(self.spin_interval)
 
         tb.addSeparator()
@@ -792,7 +798,7 @@ class MainWindow(QMainWindow):
         return next(i for i, (k, _, _) in enumerate(self.COLUMNS) if k == key)
 
     def _check_root(self):
-        if os.geteuid() != 0:
+        if hasattr(os, "geteuid") and os.geteuid() != 0:
             self._set_status(
                 "Not running as root — scan may fail. Try: sudo python3 wifi_analyzer.py",
                 "#d29922"
@@ -855,6 +861,10 @@ class MainWindow(QMainWindow):
         self.btn_scan.setText("  Scan")
         self._set_status(f"Error: {msg}", "#f85149")
         QMessageBox.critical(self, "Scan Error", msg)
+
+    def _update_auto_interval(self, value: int):
+        if self._auto_timer.isActive():
+            self._auto_timer.setInterval(value * 1000)
 
     def _toggle_auto(self, checked: bool):
         if checked:
@@ -950,7 +960,6 @@ class MainWindow(QMainWindow):
                 "essid":      n["essid"] or "<hidden>",
                 "bssid":      n["bssid"],
                 "band":       n["band"],
-                "channel":    str(n["channel"]),
                 "encryption": n["encryption"],
                 "max_rate":   f"{int(n['max_rate'])} Mbps" if n["max_rate"] else "?",
                 "vendor":     n["vendor"],
@@ -972,11 +981,17 @@ class MainWindow(QMainWindow):
                     item.setFont(QFont("Monospace", 10))
                 self.table.setItem(row, self._col(key), item)
 
-            # Sortable numeric value for signal column
-            sig_item = QTableWidgetItem()
+            # Sortable numeric item for signal column (NumericItem sorts by UserRole)
+            sig_item = NumericItem()
             sig_item.setData(Qt.UserRole, dbm)
             self.table.setItem(row, self._col("signal"), sig_item)
             self.table.setCellWidget(row, self._col("signal"), sig_widget)
+
+            # Sortable numeric item for channel column
+            ch_item = NumericItem()
+            ch_item.setData(Qt.UserRole, n["channel"])
+            ch_item.setText(str(n["channel"]))
+            self.table.setItem(row, self._col("channel"), ch_item)
 
         self.table.setSortingEnabled(True)
 
