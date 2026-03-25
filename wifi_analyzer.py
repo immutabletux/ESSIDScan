@@ -195,12 +195,36 @@ OUI_VENDORS = {
     # OpenWrt / generic
     "00:0B:AE": "Aztech",   "00:13:46": "Actiontec","2C:B0:5D": "Actiontec",
     "44:E0:CB": "Alcatel",  "08:C8:4A": "Genexis",
+    # Common ISP/CPE OUIs seen in the wild
+    "C0:4A:00": "TP-Link",  "D4:86:60": "Arcadyan", "50:9F:27": "Arcadyan",
+    "00:90:D0": "Technicolor","E4:3E:D7": "Technicolor",
+    "CC:B2:55": "BT",       "00:26:44": "BT",        "08:36:C9": "BT",
+    "AC:22:0B": "Sky",      "E4:AB:46": "Sky",        "00:24:17": "Sky",
+    "8C:04:FF": "Vodafone", "20:6D:31": "Vodafone",  "5C:F4:AB": "Vodafone",
+    "C0:A0:BB": "Virgin Media","48:4B:AA": "Virgin Media",
+    "00:1F:90": "Netopia",  "4C:17:EB": "Verizon",   "00:22:A7": "Verizon",
+    "18:68:CB": "Comcast",  "B4:75:0E": "Comcast",   "28:CF:E9": "Comcast",
+    "38:CA:DA": "Xfinity",  "70:3A:CB": "Xfinity",
+    "00:0C:E7": "Motorola", "AC:3A:7A": "Motorola",  "CC:88:26": "Motorola",
+    "00:10:18": "Broadcom", "00:90:4C": "Broadcom",
 }
 
 # Background cache for API-resolved vendors
 _vendor_cache: dict = {}
 
+
+def _is_locally_administered(bssid: str) -> bool:
+    """Return True if the MAC is locally administered (randomized)."""
+    try:
+        first = int(bssid.split(":")[0], 16)
+        return bool(first & 0x02)          # bit 1 of first octet
+    except Exception:
+        return False
+
+
 def oui_vendor(bssid: str) -> str:
+    if _is_locally_administered(bssid):
+        return "Randomized MAC"
     key = bssid[:8].upper()
     if key in OUI_VENDORS:
         return OUI_VENDORS[key]
@@ -210,8 +234,12 @@ def oui_vendor(bssid: str) -> str:
 
 
 def _fetch_vendor_async(bssid: str, callback) -> None:
-    """Query macvendors.com in a background thread; call callback(bssid, name)."""
+    """Query macvendors.com in a background thread; deliver result via QTimer (main thread)."""
     import threading
+    from PyQt5.QtCore import QTimer
+
+    if _is_locally_administered(bssid):
+        return                             # skip API call for randomized MACs
 
     def _worker():
         key = bssid[:8].upper()
@@ -219,13 +247,14 @@ def _fetch_vendor_async(bssid: str, callback) -> None:
             return
         try:
             import urllib.request
-            url  = f"https://api.macvendors.com/{bssid[:8].replace(':', '%3A')}"
-            req  = urllib.request.Request(url, headers={"User-Agent": "ESSIDscan/1.0"})
-            with urllib.request.urlopen(req, timeout=4) as r:
-                name = r.read().decode().strip()
-            if name and "errors" not in name.lower():
+            url = "https://api.macvendors.com/" + bssid[:8].replace(":", "%3A")
+            req = urllib.request.Request(url, headers={"User-Agent": "ESSIDscan/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                name = r.read().decode("utf-8", errors="replace").strip()
+            if name and len(name) < 80 and "errors" not in name.lower():
                 _vendor_cache[key] = name
-                callback(bssid, name)
+                # Marshal back to main thread via QTimer
+                QTimer.singleShot(0, lambda: callback(bssid, name))
         except Exception:
             pass
 
