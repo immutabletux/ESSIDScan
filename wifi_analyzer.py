@@ -73,18 +73,163 @@ from PyQt5.QtGui import (
 
 # ── OUI vendor table ───────────────────────────────────────────────────────────
 OUI_VENDORS = {
-    "18:D6:C7": "TP-Link",   "A4:2B:B0": "TP-Link",   "EC:08:6B": "TP-Link",
-    "8C:59:C3": "Netgear",   "A0:04:60": "Netgear",   "28:80:88": "Netgear",
-    "20:E5:2A": "Linksys",   "00:14:BF": "Linksys",
-    "00:1E:E5": "Cisco",     "00:17:94": "Cisco",
-    "B8:27:EB": "Raspberry Pi", "DC:A6:32": "Raspberry Pi",
-    "FC:EC:DA": "Ubiquiti",  "44:D9:E7": "Ubiquiti",
-    "04:18:D6": "Apple",     "AC:BC:32": "Apple",     "F0:18:98": "Apple",
-    "00:1A:2B": "Intel",     "00:23:14": "Belkin",
+    # TP-Link
+    "18:D6:C7": "TP-Link",  "A4:2B:B0": "TP-Link",  "EC:08:6B": "TP-Link",
+    "50:C7:BF": "TP-Link",  "30:DE:4B": "TP-Link",  "6C:5A:B5": "TP-Link",
+    "B0:BE:76": "TP-Link",  "64:66:B3": "TP-Link",  "F8:1A:67": "TP-Link",
+    "14:CC:20": "TP-Link",  "40:8D:5C": "TP-Link",  "28:2C:B2": "TP-Link",
+    "98:DE:D0": "TP-Link",  "54:AF:97": "TP-Link",  "AC:84:C6": "TP-Link",
+    "08:10:76": "TP-Link",  "E8:DE:27": "TP-Link",  "A0:F3:C1": "TP-Link",
+    "C4:E9:84": "TP-Link",  "B4:B0:24": "TP-Link",  "5C:89:9A": "TP-Link",
+    # Netgear
+    "8C:59:C3": "Netgear",  "A0:04:60": "Netgear",  "28:80:88": "Netgear",
+    "20:4E:7F": "Netgear",  "84:1B:5E": "Netgear",  "08:02:8E": "Netgear",
+    "00:26:F2": "Netgear",  "C0:FF:D4": "Netgear",  "9C:D3:6D": "Netgear",
+    "E0:46:9A": "Netgear",  "6C:B0:CE": "Netgear",  "44:94:FC": "Netgear",
+    # Linksys / Cisco
+    "20:E5:2A": "Linksys",  "00:14:BF": "Linksys",  "00:1E:E5": "Cisco",
+    "00:17:94": "Cisco",    "68:7F:74": "Cisco",    "00:23:69": "Cisco",
+    "C0:C1:C0": "Cisco",    "00:25:45": "Cisco",    "58:BC:27": "Cisco",
+    "68:EF:BD": "Cisco",    "00:0C:29": "VMware",
+    # Asus
+    "00:11:2F": "Asus",     "70:8B:CD": "Asus",     "AC:22:0B": "Asus",
+    "50:46:5D": "Asus",     "04:D4:C4": "Asus",     "2C:4D:54": "Asus",
+    "38:D5:47": "Asus",     "74:D0:2B": "Asus",     "78:24:AF": "Asus",
+    "90:E6:BA": "Asus",     "B0:6E:BF": "Asus",     "18:31:BF": "Asus",
+    "6C:FD:B9": "Asus",     "F8:32:E4": "Asus",     "3C:7C:3F": "Asus",
+    # D-Link
+    "00:0D:88": "D-Link",   "1C:7E:E5": "D-Link",   "28:10:7B": "D-Link",
+    "34:08:04": "D-Link",   "78:54:2E": "D-Link",   "B8:A3:86": "D-Link",
+    "C8:BE:19": "D-Link",   "EC:43:F6": "D-Link",   "F0:7D:68": "D-Link",
+    "18:0F:76": "D-Link",   "00:26:5A": "D-Link",   "90:94:E4": "D-Link",
+    # Huawei
+    "00:1E:10": "Huawei",   "34:6B:D3": "Huawei",   "48:5D:60": "Huawei",
+    "54:89:98": "Huawei",   "6C:E8:73": "Huawei",   "9C:74:1A": "Huawei",
+    "D8:49:2F": "Huawei",   "E8:CD:2D": "Huawei",   "FC:48:EF": "Huawei",
+    "28:31:52": "Huawei",   "4C:1F:CC": "Huawei",   "AC:E2:15": "Huawei",
+    # ZTE
+    "00:F0:D1": "ZTE",      "0C:D2:92": "ZTE",      "28:5F:DB": "ZTE",
+    "40:B0:FA": "ZTE",      "58:A2:C2": "ZTE",      "A4:3D:78": "ZTE",
+    "BC:76:70": "ZTE",      "70:72:CF": "ZTE",      "C8:50:E9": "ZTE",
+    # Xiaomi / Mi
+    "00:9E:C8": "Xiaomi",   "28:6C:07": "Xiaomi",   "34:CE:00": "Xiaomi",
+    "50:64:2B": "Xiaomi",   "58:44:98": "Xiaomi",   "64:09:80": "Xiaomi",
+    "6C:EB:B3": "Xiaomi",   "78:11:DC": "Xiaomi",   "8C:BE:BE": "Xiaomi",
+    "9C:99:A0": "Xiaomi",   "A0:86:C6": "Xiaomi",   "B0:E2:35": "Xiaomi",
+    "F0:B4:29": "Xiaomi",   "F4:8C:EB": "Xiaomi",   "FC:64:BA": "Xiaomi",
+    "2C:DB:07": "Xiaomi",   "3C:BD:D8": "Xiaomi",   "DC:44:27": "Xiaomi",
+    # Ubiquiti
+    "FC:EC:DA": "Ubiquiti", "44:D9:E7": "Ubiquiti", "00:27:22": "Ubiquiti",
+    "24:A4:3C": "Ubiquiti", "68:72:51": "Ubiquiti", "74:83:C2": "Ubiquiti",
+    "78:8A:20": "Ubiquiti", "80:2A:A8": "Ubiquiti", "DC:9F:DB": "Ubiquiti",
+    "E0:63:DA": "Ubiquiti", "B4:FB:E4": "Ubiquiti", "F0:9F:C2": "Ubiquiti",
+    "18:E8:29": "Ubiquiti", "04:18:D6": "Ubiquiti",
+    # Apple / AirPort
+    "AC:BC:32": "Apple",    "F0:18:98": "Apple",    "00:17:F2": "Apple",
+    "3C:15:C2": "Apple",    "40:D3:2D": "Apple",    "44:00:10": "Apple",
+    "58:B1:35": "Apple",    "64:9A:BE": "Apple",    "70:73:CB": "Apple",
+    "7C:D1:C3": "Apple",    "8C:2D:AA": "Apple",    "A8:60:B6": "Apple",
+    "A8:88:08": "Apple",    "AC:CF:85": "Apple",    "B8:E8:56": "Apple",
+    "C8:BC:C8": "Apple",    "DC:2B:2A": "Apple",    "E0:F8:47": "Apple",
+    "F4:F1:5A": "Apple",
+    # Intel
+    "00:1A:2B": "Intel",    "00:23:14": "Intel",    "8C:8D:28": "Intel",
+    "A4:C3:F0": "Intel",    "34:02:86": "Intel",    "8C:EC:4B": "Intel",
+    "54:27:1E": "Intel",    "AC:72:89": "Intel",    "00:09:92": "Intel",
+    # Arris / CommScope
+    "00:26:B8": "Arris",    "18:1B:EB": "Arris",    "40:C7:29": "Arris",
+    "70:C9:D9": "Arris",    "98:F1:98": "Arris",    "B0:72:BF": "Arris",
+    "D4:05:98": "Arris",    "4C:34:88": "Arris",
+    # Technicolor / Thomson
+    "00:90:D0": "Technicolor","38:60:77": "Technicolor","40:4A:03": "Technicolor",
+    "70:54:D2": "Technicolor","78:94:B4": "Technicolor","A8:9D:21": "Technicolor",
+    "C0:25:E9": "Technicolor",
+    # Sagemcom
+    "00:1F:A4": "Sagemcom", "18:CF:5E": "Sagemcom", "AC:3B:77": "Sagemcom",
+    "E4:A7:49": "Sagemcom",
+    # Raspberry Pi
+    "B8:27:EB": "Raspberry Pi","DC:A6:32": "Raspberry Pi","E4:5F:01": "Raspberry Pi",
+    "28:CD:C1": "Raspberry Pi",
+    # Belkin
+    "00:23:14": "Belkin",   "94:44:52": "Belkin",   "EC:1A:59": "Belkin",
+    "14:91:82": "Belkin",
+    # Motorola / Arris
+    "00:0C:E7": "Motorola", "AC:3A:7A": "Motorola", "CC:88:26": "Motorola",
+    # Tenda
+    "C8:3A:35": "Tenda",    "E4:6F:13": "Tenda",    "F4:92:BF": "Tenda",
+    "80:EA:96": "Tenda",    "48:EE:0C": "Tenda",    "00:0A:EB": "Tenda",
+    # Buffalo
+    "00:1D:73": "Buffalo",  "10:6F:3F": "Buffalo",  "1C:87:2C": "Buffalo",
+    "30:85:A9": "Buffalo",  "7C:DD:90": "Buffalo",
+    # Mikrotik
+    "4C:5E:0C": "MikroTik", "6C:3B:6B": "MikroTik", "CC:2D:E0": "MikroTik",
+    "D4:CA:6D": "MikroTik", "48:8F:5A": "MikroTik", "74:4D:28": "MikroTik",
+    "B8:69:F4": "MikroTik", "DC:2C:6E": "MikroTik",
+    # Qualcomm / Atheros
+    "00:03:7F": "Atheros",  "00:1C:BE": "Qualcomm",
+    # Samsung
+    "00:15:B9": "Samsung",  "00:21:4C": "Samsung",  "00:26:37": "Samsung",
+    "0C:14:20": "Samsung",  "14:49:E0": "Samsung",  "1C:62:B8": "Samsung",
+    "28:39:26": "Samsung",  "2C:AE:2B": "Samsung",  "3C:77:E6": "Samsung",
+    "48:44:F7": "Samsung",  "50:85:69": "Samsung",  "54:9B:12": "Samsung",
+    "60:A1:0A": "Samsung",  "78:40:E4": "Samsung",  "84:55:A5": "Samsung",
+    "A0:07:98": "Samsung",  "B0:72:73": "Samsung",  "CC:07:AB": "Samsung",
+    # Google / Nest
+    "18:B4:30": "Google",   "20:DF:B9": "Google",   "30:FD:38": "Google",
+    "48:D6:D5": "Google",   "54:60:09": "Google",   "F4:F5:D8": "Google",
+    "A4:77:33": "Google",   "D4:F5:47": "Google",
+    # Amazon
+    "40:B4:CD": "Amazon",   "44:65:0D": "Amazon",   "68:37:E9": "Amazon",
+    "74:75:48": "Amazon",   "84:D6:D0": "Amazon",   "F0:A2:25": "Amazon",
+    "FC:A1:83": "Amazon",   "A0:02:DC": "Amazon",
+    # Eero
+    "A0:D8:07": "Eero",     "C0:94:35": "Eero",     "F4:39:09": "Eero",
+    # Netis
+    "C8:D5:FE": "Netis",    "C4:E9:84": "Netis",
+    # Synology
+    "00:11:32": "Synology",
+    # QNAP
+    "00:08:9B": "QNAP",     "24:5E:BE": "QNAP",
+    # GL.iNet
+    "94:83:C4": "GL.iNet",  "A8:A1:59": "GL.iNet",  "E4:95:6E": "GL.iNet",
+    # OpenWrt / generic
+    "00:0B:AE": "Aztech",   "00:13:46": "Actiontec","2C:B0:5D": "Actiontec",
+    "44:E0:CB": "Alcatel",  "08:C8:4A": "Genexis",
 }
 
+# Background cache for API-resolved vendors
+_vendor_cache: dict = {}
+
 def oui_vendor(bssid: str) -> str:
-    return OUI_VENDORS.get(bssid[:8].upper(), "Unknown")
+    key = bssid[:8].upper()
+    if key in OUI_VENDORS:
+        return OUI_VENDORS[key]
+    if key in _vendor_cache:
+        return _vendor_cache[key]
+    return "Unknown"
+
+
+def _fetch_vendor_async(bssid: str, callback) -> None:
+    """Query macvendors.com in a background thread; call callback(bssid, name)."""
+    import threading
+
+    def _worker():
+        key = bssid[:8].upper()
+        if key in OUI_VENDORS or key in _vendor_cache:
+            return
+        try:
+            import urllib.request
+            url  = f"https://api.macvendors.com/{bssid[:8].replace(':', '%3A')}"
+            req  = urllib.request.Request(url, headers={"User-Agent": "ESSIDscan/1.0"})
+            with urllib.request.urlopen(req, timeout=4) as r:
+                name = r.read().decode().strip()
+            if name and "errors" not in name.lower():
+                _vendor_cache[key] = name
+                callback(bssid, name)
+        except Exception:
+            pass
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 # ── Signal helpers ─────────────────────────────────────────────────────────────
@@ -1752,6 +1897,24 @@ class MainWindow(QMainWindow):
                 elif key in ("bssid",):
                     item.setFont(QFont("Monospace", 10))
                 self.table.setItem(row, self._col(key), item)
+
+            # Fire async vendor lookup for unknowns
+            if n["vendor"] == "Unknown":
+                def _make_cb(bssid_key):
+                    def _cb(bssid, name):
+                        # Update the network dict
+                        for net in self._networks:
+                            if net["bssid"] == bssid:
+                                net["vendor"] = name
+                        # Update visible rows
+                        for r in range(self.table.rowCount()):
+                            bssid_item = self.table.item(r, self._col("bssid"))
+                            if bssid_item and bssid_item.text() == bssid:
+                                v_item = self.table.item(r, self._col("vendor"))
+                                if v_item:
+                                    v_item.setText(name)
+                    return _cb
+                _fetch_vendor_async(n["bssid"], _make_cb(n["bssid"]))
 
             # Sortable numeric item for signal column (NumericItem sorts by UserRole)
             sig_item = NumericItem()
